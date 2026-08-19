@@ -1658,12 +1658,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         function getLogCardHtml(log) {
-            let screenshotLink = '';
+            let inlineScreenshot = '';
             if (log.screenshot) {
-                screenshotLink = `<span class="log-screenshot-link" onclick="openImage('${log.screenshot}')">
-                    <svg style="width:14px;height:14px;display:inline-block;vertical-align:text-bottom;margin-right:2px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                    View Screenshot
-                </span>`;
+                inlineScreenshot = `
+                    <div style="margin-top: 0.75rem; padding-left: 2rem;">
+                        <img src="${log.screenshot}" alt="Screenshot" 
+                             style="max-width: 380px; max-height: 220px; width: auto; height: auto; border-radius: 8px; border: 1px solid var(--border); cursor: pointer; transition: transform 0.2s ease, box-shadow 0.2s ease; box-shadow: 0 4px 12px rgba(0,0,0,0.25);" 
+                             onclick="openImage('${log.screenshot}')"
+                             onmouseover="this.style.transform='scale(1.02)'; this.style.boxShadow='0 8px 24px rgba(0,0,0,0.35)';" 
+                             onmouseout="this.style.transform='scale(1)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.25)';"
+                             onerror="this.style.display='none';">
+                    </div>
+                `;
             }
             
             const escapedText = log.text.replace(/'/g, "\\'").replace(/"/g, "&quot;");
@@ -1671,7 +1677,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const isChecked = selectedLogKeys.has(key) ? 'checked' : '';
             
             return `
-                <div class="log-card">
+                <div class="log-card" style="padding-bottom: 1.25rem;">
                     <div class="log-meta">
                         <div class="checkbox-container">
                             <input type="checkbox" class="card-checkbox log-item-checkbox" data-timestamp="${log.timestamp}" data-text="${escapedText}" ${isChecked} onchange="updateLogSelection()">
@@ -1682,8 +1688,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             &times; Delete
                         </button>
                     </div>
-                    <div class="log-text" style="padding-left: 2rem;">${escapeHtml(log.text)}</div>
-                    ${screenshotLink ? `<div style="margin-top: 0.75rem; padding-left: 2rem;">${screenshotLink}</div>` : ''}
+                    <div class="log-text" style="padding-left: 2rem; font-weight: 500; font-size: 0.95rem; color: var(--text-main);">${escapeHtml(log.text)}</div>
+                    ${inlineScreenshot}
                 </div>
             `;
         }
