@@ -1897,7 +1897,7 @@ def get_local_ip():
 
 def run_server():
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
     # Check if we should only run the server (no local keyboard/mouse listeners)
