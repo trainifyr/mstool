@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Local logs and screenshots
+logs/
+screenshots/
+watchdog_log.txt
+log.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Backups and temporary files
+*.bak
+test_mock.webp
