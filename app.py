@@ -765,14 +765,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="date-selector-wrapper">
                     <button onclick="promptRenameDevice()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem;" title="Rename Device">Rename</button>
                     <button id="toggle-monitor-btn" onclick="toggleDeviceMonitoring()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Pause/Resume Monitoring">Pause Logs</button>
-                    <button onclick="purgeSelectedDateRange()" style="background: none; border: none; color: #ef4444; font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Purge all logs & screenshots for selected date range">Purge Dates</button>
+                    <button id="purge-btn" onclick="purgeSelectedDateRange()" style="background: none; border: none; color: #ef4444; font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Purge all logs & screenshots for selected timeframe">Purge Today</button>
                 </div>
                 <div class="date-selector-wrapper">
-                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Start Date:</span>
+                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Timeframe:</span>
+                    <select id="date-preset-select" class="date-select" onchange="changeDatePreset(this.value)">
+                        <option value="today">Today</option>
+                        <option value="range">Date Range</option>
+                        <option value="all">All Time</option>
+                    </select>
+                </div>
+                <div class="date-selector-wrapper" id="start-date-wrapper" style="display: none;">
+                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Start:</span>
                     <input type="date" id="start-date-input" class="date-select" onchange="changeDateRange()" style="border: none; color-scheme: dark; font-weight: 600;">
                 </div>
-                <div class="date-selector-wrapper">
-                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">End Date:</span>
+                <div class="date-selector-wrapper" id="end-date-wrapper" style="display: none;">
+                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">End:</span>
                     <input type="date" id="end-date-input" class="date-select" onchange="changeDateRange()" style="border: none; color-scheme: dark; font-weight: 600;">
                 </div>
                 <div class="date-selector-wrapper">
@@ -1114,7 +1122,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         async function purgeSelectedDateRange() {
             if (!selectedDevice) return;
-            const message = `Are you sure you want to permanently delete ALL activity logs and screenshots for this device (${selectedDevice}) from ${startDate} to ${endDate}? This action CANNOT be undone and will clear records even if they are not fully loaded in the browser.`;
+            let rangeMsg = "";
+            if (datePreset === 'today') {
+                rangeMsg = "today's activity";
+            } else if (datePreset === 'range') {
+                rangeMsg = `activity from ${startDate} to ${endDate}`;
+            } else {
+                rangeMsg = "entire user dataset (ALL TIME)";
+            }
+            
+            const message = `Are you sure you want to permanently delete ALL activity logs and screenshots for this device (${selectedDevice}) matching ${rangeMsg}? This action CANNOT be undone and will clear records even if they are not fully loaded in the browser.`;
             if (!confirm(message)) {
                 return;
             }
@@ -1139,6 +1156,41 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             } catch (err) {
                 console.error("Error purging date range:", err);
             }
+        }
+
+        let datePreset = localStorage.getItem('datePreset') || 'today';
+
+        function changeDatePreset(val) {
+            datePreset = val;
+            localStorage.setItem('datePreset', val);
+            
+            const startWrapper = document.getElementById('start-date-wrapper');
+            const endWrapper = document.getElementById('end-date-wrapper');
+            const purgeBtn = document.getElementById('purge-btn');
+            
+            if (val === 'today') {
+                startWrapper.style.display = 'none';
+                endWrapper.style.display = 'none';
+                const todayStr = new Date().toISOString().split('T')[0];
+                startDate = todayStr;
+                endDate = todayStr;
+                if (purgeBtn) purgeBtn.innerText = "Purge Today";
+            } else if (val === 'range') {
+                startWrapper.style.display = 'flex';
+                endWrapper.style.display = 'flex';
+                startDate = document.getElementById('start-date-input').value || new Date().toISOString().split('T')[0];
+                endDate = document.getElementById('end-date-input').value || new Date().toISOString().split('T')[0];
+                if (purgeBtn) purgeBtn.innerText = "Purge Range";
+            } else if (val === 'all') {
+                startWrapper.style.display = 'none';
+                endWrapper.style.display = 'none';
+                startDate = '';
+                endDate = '';
+                if (purgeBtn) purgeBtn.innerText = "Purge All Time";
+            }
+            
+            fetchLogs();
+            fetchScreenshots();
         }
 
         function selectDeviceDetails(deviceId) {
@@ -1195,13 +1247,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         async function fetchLogs() {
-            if (!startDate || !endDate) {
-                document.getElementById('logs-list').innerHTML = '<div class="no-data">No logs found for this date range/device.</div>';
+            if (!selectedDevice) return;
+            const isAllTime = datePreset === 'all';
+            if (!isAllTime && (!startDate || !endDate)) {
+                document.getElementById('logs-list').innerHTML = '<div class="no-data">No logs found for this timeframe.</div>';
                 document.getElementById('logs-action-bar').style.display = 'none';
                 return;
             }
             try {
-                const res = await fetch(`/api/logs?start_date=${startDate}&end_date=${endDate}&device_id=${selectedDevice}`);
+                const res = await fetch(`/api/logs?all_time=${isAllTime}&start_date=${startDate}&end_date=${endDate}&device_id=${selectedDevice}`);
                 const data = await res.json();
                 allLogs = data;
                 applyFilters();
@@ -1211,13 +1265,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         async function fetchScreenshots() {
-            if (!startDate || !endDate) {
-                document.getElementById('screenshots-grid').innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No screenshots found for this date range/device.</div>';
+            if (!selectedDevice) return;
+            const isAllTime = datePreset === 'all';
+            if (!isAllTime && (!startDate || !endDate)) {
+                document.getElementById('screenshots-grid').innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No screenshots found for this timeframe.</div>';
                 document.getElementById('screenshots-action-bar').style.display = 'none';
                 return;
             }
             try {
-                const res = await fetch(`/api/screenshots?start_date=${startDate}&end_date=${endDate}&device_id=${selectedDevice}`);
+                const res = await fetch(`/api/screenshots?all_time=${isAllTime}&start_date=${startDate}&end_date=${endDate}&device_id=${selectedDevice}`);
                 const data = await res.json();
                 allScreenshots = data;
                 applyFilters();
@@ -1605,6 +1661,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('start-date-input').value = startDate;
             document.getElementById('end-date-input').value = endDate;
             
+            // Restore date preset selection
+            const presetSelect = document.getElementById('date-preset-select');
+            if (presetSelect) {
+                presetSelect.value = datePreset;
+                changeDatePreset(datePreset);
+            }
+            
             await fetchDevices();
             
             // Restore navigation view state
@@ -1765,8 +1828,6 @@ def delete_device():
             return jsonify({"status": "success"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-    return jsonify({"error": "Supabase not configured"}), 500
-
 @app.route('/api/logs/purge-range', methods=['POST'])
 def purge_range():
     try:
@@ -1775,19 +1836,23 @@ def purge_range():
         start_date = data.get("start_date")
         end_date = data.get("end_date")
         
-        if not device_id or not start_date or not end_date:
-            return jsonify({"error": "Device ID, Start Date, and End Date are required"}), 400
+        if not device_id:
+            return jsonify({"error": "Device ID required"}), 400
             
+        all_time = not start_date or not end_date
+        
         deleted_count = 0
         if supabase is not None:
             try:
                 # 1. Fetch screenshot filenames to delete from Storage
-                res = supabase.table("activity_logs") \
+                query = supabase.table("activity_logs") \
                     .select("screenshot_filename") \
-                    .eq("device_id", device_id) \
-                    .gte("created_date", start_date) \
-                    .lte("created_date", end_date) \
-                    .execute()
+                    .eq("device_id", device_id)
+                    
+                if not all_time:
+                    query = query.gte("created_date", start_date).lte("created_date", end_date)
+                    
+                res = query.execute()
                     
                 if res.data:
                     screenshot_files = [
@@ -1805,13 +1870,14 @@ def purge_range():
                                 pass
                                 
                 # 2. Delete database rows
-                del_res = supabase.table("activity_logs") \
+                del_query = supabase.table("activity_logs") \
                     .delete() \
-                    .eq("device_id", device_id) \
-                    .gte("created_date", start_date) \
-                    .lte("created_date", end_date) \
-                    .execute()
+                    .eq("device_id", device_id)
                     
+                if not all_time:
+                    del_query = del_query.gte("created_date", start_date).lte("created_date", end_date)
+                    
+                del_res = del_query.execute()
                 deleted_count = len(del_res.data) if del_res.data else 0
             except Exception as e:
                 print(f"Failed to purge date range from Supabase: {e}")
@@ -1873,10 +1939,11 @@ def get_available_dates():
 
 @app.route('/api/logs')
 def get_logs():
+    all_time = request.args.get("all_time", "false").lower() == "true"
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
     
-    if not start_date or not end_date:
+    if not all_time and (not start_date or not end_date):
         single_date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
         start_date = single_date
         end_date = single_date
@@ -1887,9 +1954,10 @@ def get_logs():
     if supabase is not None:
         try:
             query = supabase.table("activity_logs") \
-                .select("timestamp, window_title, typed_text, screenshot_url, screenshot_filename") \
-                .gte("created_date", start_date) \
-                .lte("created_date", end_date)
+                .select("timestamp, window_title, typed_text, screenshot_url, screenshot_filename")
+            
+            if not all_time:
+                query = query.gte("created_date", start_date).lte("created_date", end_date)
             
             if device_id:
                 query = query.eq("device_id", device_id)
@@ -1925,10 +1993,11 @@ def get_logs():
 
 @app.route('/api/screenshots')
 def get_screenshots():
+    all_time = request.args.get("all_time", "false").lower() == "true"
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
     
-    if not start_date or not end_date:
+    if not all_time and (not start_date or not end_date):
         single_date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
         start_date = single_date
         end_date = single_date
@@ -1939,10 +2008,12 @@ def get_screenshots():
     if supabase is not None:
         try:
             query = supabase.table("activity_logs") \
-                .select("timestamp, window_title, screenshot_url, screenshot_filename") \
-                .gte("created_date", start_date) \
-                .lte("created_date", end_date) \
-                .not_.is_("screenshot_url", "null")
+                .select("timestamp, window_title, screenshot_url, screenshot_filename")
+                
+            if not all_time:
+                query = query.gte("created_date", start_date).lte("created_date", end_date)
+                
+            query = query.not_.is_("screenshot_url", "null")
             
             if device_id:
                 query = query.eq("device_id", device_id)
