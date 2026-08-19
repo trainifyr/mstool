@@ -7,7 +7,7 @@ import subprocess
 # Fixed Paths
 PYTHON_EXE = r"C:\Users\Venkatesh\AppData\Local\Python\pythoncore-3.14-64\python.exe"
 PYTHONW_EXE = r"C:\Users\Venkatesh\AppData\Local\Python\pythoncore-3.14-64\pythonw.exe"
-SCRIPT_PATH = r"d:\AI\tool\hello.py"
+SCRIPT_PATH = r"d:\AI\tool\app.py"
 LOG_PATH = r"d:\AI\tool\watchdog_log.txt"
 STARTUP_FOLDER = r"C:\Users\Venkatesh\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
 VBS_LAUNCHER_PATH = os.path.join(STARTUP_FOLDER, "start_watchdog.vbs")
@@ -42,10 +42,10 @@ def is_healthy():
 def kill_stale_processes():
     try:
         log_event("Terminating stale processes...")
-        # Precise command to kill any python processes running hello.py (excluding the watchdog itself)
+        # Precise command to kill any python processes running app.py (excluding the watchdog itself)
         ps_cmd = (
             f"Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
-            f"Where-Object {{$_.CommandLine -like '*hello.py*'}} | "
+            f"Where-Object {{$_.CommandLine -like '*app.py*'}} | "
             f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
         )
         subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
@@ -59,14 +59,14 @@ def kill_stale_processes():
     except Exception as e:
         log_event(f"Error while killing stale processes: {e}")
 
-def start_hello():
-    log_event("Starting hello.py...")
+def start_app():
+    log_event("Starting app.py...")
     try:
-        # Run hello.py in background silently using pythonw.exe
+        # Run app.py in background silently using pythonw.exe
         subprocess.Popen([PYTHONW_EXE, SCRIPT_PATH], cwd=os.path.dirname(SCRIPT_PATH))
-        log_event("hello.py successfully launched.")
+        log_event("app.py successfully launched.")
     except Exception as e:
-        log_event(f"Failed to start hello.py: {e}")
+        log_event(f"Failed to start app.py: {e}")
 
 def install():
     print("==================================================")
@@ -115,7 +115,7 @@ def monitor_loop():
                 log_event("Application is unresponsive or down. Re-initializing...")
                 kill_stale_processes()
                 time.sleep(2)
-                start_hello()
+                start_app()
         except Exception as e:
             log_event(f"Error in monitor loop: {e}")
         time.sleep(30)
