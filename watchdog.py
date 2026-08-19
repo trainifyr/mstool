@@ -63,7 +63,7 @@ def log_event(message):
 def is_healthy():
     try:
         # Check if the Flask server port 5000 is open and responding
-        with urllib.request.urlopen("http://localhost:5000/", timeout=5) as response:
+        with urllib.request.urlopen("http://127.0.0.1:5000/", timeout=5) as response:
             return response.status == 200
     except Exception:
         return False
