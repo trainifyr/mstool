@@ -149,7 +149,10 @@ def check_remote_config_loop():
                 
         except Exception as e:
             print(f"Failed to check remote config status: {e}")
-        time.sleep(30)
+            
+        # Poll interval from environment variable (default: 900 seconds / 15 minutes)
+        poll_interval = int(os.getenv("CONFIG_POLL_INTERVAL", "900"))
+        time.sleep(poll_interval)
 
 # Register local device on client startup (only if not running in SERVER_ONLY mode and running on Windows)
 server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is None or os.name != 'nt'
