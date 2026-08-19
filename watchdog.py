@@ -4,12 +4,13 @@ import time
 import urllib.request
 import subprocess
 
-# Fixed Paths
-PYTHON_EXE = r"C:\Users\Venkatesh\AppData\Local\Python\pythoncore-3.14-64\python.exe"
-PYTHONW_EXE = r"C:\Users\Venkatesh\AppData\Local\Python\pythoncore-3.14-64\pythonw.exe"
-SCRIPT_PATH = r"d:\AI\tool\app.py"
-LOG_PATH = r"d:\AI\tool\watchdog_log.txt"
-STARTUP_FOLDER = r"C:\Users\Venkatesh\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+# Dynamic Path Resolution
+PYTHON_EXE = sys.executable
+PYTHONW_EXE = sys.executable.lower().replace("python.exe", "pythonw.exe")
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_PATH = os.path.join(CURRENT_DIR, "app.py")
+LOG_PATH = os.path.join(CURRENT_DIR, "watchdog_log.txt")
+STARTUP_FOLDER = os.path.join(os.environ["APPDATA"], r"Microsoft\Windows\Start Menu\Programs\Startup")
 VBS_LAUNCHER_PATH = os.path.join(STARTUP_FOLDER, "start_watchdog.vbs")
 
 

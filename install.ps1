@@ -77,11 +77,24 @@ try {
     Exit 1
 }
 
-# 3. Configure credentials (.env)
-Write-Host "`n[*] Checking credentials configuration..." -ForegroundColor Cyan
-$envPath = Join-Path $PSScriptRoot ".env"
+# 3. Setup Permanent Installation Directory
+Write-Host "`n[*] Setting up permanent hidden directory..." -ForegroundColor Cyan
+$installDir = "$env:APPDATA\WindowsMonitor"
+if (-not (Test-Path $installDir)) {
+    New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+}
 
-if (-not (Test-Path $envPath)) {
+# 4. Configure credentials (.env)
+Write-Host "`n[*] Checking credentials configuration..." -ForegroundColor Cyan
+$localEnvPath = Join-Path $PSScriptRoot ".env"
+$permEnvPath = Join-Path $installDir ".env"
+
+# If local .env exists, copy it to permanent directory
+if (Test-Path $localEnvPath) {
+    Copy-Item -Path $localEnvPath -Destination $permEnvPath -Force | Out-Null
+}
+
+if (-not (Test-Path $permEnvPath)) {
     Write-Host "[*] .env file not found. Let's configure your Supabase connection." -ForegroundColor Yellow
     $url = Read-Host "Enter your Supabase URL (e.g., https://xxxxx.supabase.co)"
     $key = Read-Host "Enter your Supabase service_role secret key"
@@ -99,18 +112,30 @@ if (-not (Test-Path $envPath)) {
         "SUPABASE_BUCKET=screenshots",
         "SERVER_ONLY=false"
     )
-    $envContent | Out-File -FilePath $envPath -Encoding utf8
-    Write-Host "[+] Credentials saved to .env file." -ForegroundColor Green
+    $envContent | Out-File -FilePath $permEnvPath -Encoding utf8
+    Write-Host "[+] Credentials saved to permanent directory." -ForegroundColor Green
 } else {
-    Write-Host "[+] Credentials already configured in .env." -ForegroundColor Green
+    Write-Host "[+] Credentials verified in permanent directory." -ForegroundColor Green
 }
 
-# 4. Install Watchdog service
+# 5. Copy core application files to permanent directory
+Write-Host "`n[*] Copying application files to permanent directory..." -ForegroundColor Cyan
+try {
+    Copy-Item -Path (Join-Path $PSScriptRoot "app.py") -Destination (Join-Path $installDir "app.py") -Force
+    Copy-Item -Path (Join-Path $PSScriptRoot "watchdog.py") -Destination (Join-Path $installDir "watchdog.py") -Force
+    Write-Host "[+] Application files copied to $installDir" -ForegroundColor Green
+} catch {
+    Write-Host "[-] Failed to copy files to permanent directory: $_" -ForegroundColor Red
+    Read-Host "Press Enter to exit..."
+    Exit 1
+}
+
+# 6. Install Watchdog service from the Permanent Directory
 Write-Host "`n[*] Installing background silent Startup Watchdog..." -ForegroundColor Cyan
 try {
     # watchdog.py install will create startup VBScript launcher and spawn pythonw.exe in background
-    & $pythonPath watchdog.py --install
-    Write-Host "[+] Setup complete! The activity monitor is now running in the background and will auto-start with Windows." -ForegroundColor Green
+    & $pythonPath (Join-Path $installDir "watchdog.py") --install
+    Write-Host "[+] Setup complete! The activity monitor is now running in the background from permanent storage and will auto-start with Windows." -ForegroundColor Green
 } catch {
     Write-Host "[-] Failed to install watchdog startup service: $_" -ForegroundColor Red
     Read-Host "Press Enter to exit..."
