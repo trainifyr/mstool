@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import socket
 import ctypes
@@ -82,9 +83,12 @@ def register_device():
 
 is_monitoring_disabled = False
 disable_mouse_clicks = False
+periodic_screenshot_interval = 300
+zero_footprint = False
+idle_threshold = 300
 
 def check_remote_config_loop():
-    global is_monitoring_disabled, disable_mouse_clicks
+    global is_monitoring_disabled, disable_mouse_clicks, periodic_screenshot_interval, zero_footprint, idle_threshold
     if supabase is None:
         return
     device_id = get_device_id()
@@ -96,13 +100,53 @@ def check_remote_config_loop():
                 .eq("window_title", "__DEVICE_CONFIG__") \
                 .limit(1) \
                 .execute()
+            
+            config = {}
             if res.data:
                 config = json.loads(res.data[0].get("typed_text", "{}"))
                 is_monitoring_disabled = config.get("is_disabled", False)
                 disable_mouse_clicks = config.get("disable_mouse_clicks", False)
+                periodic_screenshot_interval = int(config.get("periodic_screenshot_interval", 300))
+                zero_footprint = config.get("zero_footprint", False)
+                idle_threshold = int(config.get("idle_threshold", 300))
             else:
                 is_monitoring_disabled = False
                 disable_mouse_clicks = False
+                periodic_screenshot_interval = 300
+                zero_footprint = False
+                idle_threshold = 300
+                config = {
+                    "is_disabled": False,
+                    "disable_mouse_clicks": False,
+                    "periodic_screenshot_interval": 300,
+                    "zero_footprint": False,
+                    "idle_threshold": 300
+                }
+            
+            # Write sync status back to Supabase
+            try:
+                # 1. Clean up old sync status rows for this device
+                supabase.table("activity_logs") \
+                    .delete() \
+                    .eq("device_id", device_id) \
+                    .eq("window_title", "__CLIENT_SYNC_STATUS__") \
+                    .execute()
+                
+                # 2. Insert fresh sync status row
+                sync_payload = {
+                    **config,
+                    "synced_at": datetime.now().isoformat()
+                }
+                supabase.table("activity_logs").insert({
+                    "device_id": device_id,
+                    "window_title": "__CLIENT_SYNC_STATUS__",
+                    "typed_text": json.dumps(sync_payload),
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "created_date": datetime.now().strftime("%Y-%m-%d")
+                }).execute()
+            except Exception as se:
+                print(f"Failed to write sync status: {se}")
+                
         except Exception as e:
             print(f"Failed to check remote config status: {e}")
         time.sleep(30)
@@ -1059,6 +1103,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const d = allDevices.find(dev => dev.device_id === selectedDevice);
             document.getElementById('settings-nickname').value = d ? (d.nickname || '') : '';
             
+            // Set defaults initially
+            document.getElementById('settings-is-disabled').checked = false;
+            document.getElementById('settings-disable-mouse').checked = false;
+            document.getElementById('settings-zero-footprint').checked = false;
+            document.getElementById('settings-periodic-interval').value = "300";
+            document.getElementById('settings-idle-threshold').value = "300";
+            
+            const dot = document.getElementById('sync-status-dot');
+            const txt = document.getElementById('sync-status-text');
+            dot.style.backgroundColor = '#94a3b8';
+            txt.innerText = 'Checking sync status...';
+            
             // Fetch configuration from server
             try {
                 const res = await fetch(`/api/devices/config?device_id=${encodeURIComponent(selectedDevice)}`);
@@ -1066,9 +1122,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     const config = await res.json();
                     document.getElementById('settings-is-disabled').checked = config.is_disabled || false;
                     document.getElementById('settings-disable-mouse').checked = config.disable_mouse_clicks || false;
+                    document.getElementById('settings-zero-footprint').checked = config.zero_footprint || false;
+                    document.getElementById('settings-periodic-interval').value = String(config.periodic_screenshot_interval !== undefined ? config.periodic_screenshot_interval : 300);
+                    document.getElementById('settings-idle-threshold').value = String(config.idle_threshold !== undefined ? config.idle_threshold : 300);
                 }
             } catch (err) {
                 console.error("Error fetching device config:", err);
+            }
+            
+            // Fetch sync status
+            try {
+                const res = await fetch(`/api/devices/sync-status?device_id=${encodeURIComponent(selectedDevice)}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.is_synced) {
+                        dot.style.backgroundColor = 'var(--live)';
+                        txt.innerText = data.synced_at 
+                            ? `Synced with laptop (Last synced: ${new Date(data.synced_at).toLocaleTimeString()})`
+                            : 'Synced with laptop';
+                    } else {
+                        dot.style.backgroundColor = '#f59e0b';
+                        txt.innerText = 'Pending sync (Waiting for laptop to poll...)';
+                    }
+                }
+            } catch (err) {
+                console.error("Error fetching sync status:", err);
             }
             
             const modal = document.getElementById('settings-modal');
@@ -1092,6 +1170,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const nickname = document.getElementById('settings-nickname').value;
             const isDisabled = document.getElementById('settings-is-disabled').checked;
             const disableMouse = document.getElementById('settings-disable-mouse').checked;
+            const zeroFootprint = document.getElementById('settings-zero-footprint').checked;
+            const periodicInterval = parseInt(document.getElementById('settings-periodic-interval').value);
+            const idleThreshold = parseInt(document.getElementById('settings-idle-threshold').value);
             
             try {
                 // 1. Rename nickname if modified
@@ -1108,7 +1189,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     body: JSON.stringify({
                         device_id: selectedDevice,
                         is_disabled: isDisabled,
-                        disable_mouse_clicks: disableMouse
+                        disable_mouse_clicks: disableMouse,
+                        zero_footprint: zeroFootprint,
+                        periodic_screenshot_interval: periodicInterval,
+                        idle_threshold: idleThreshold
                     })
                 });
                 
@@ -2063,7 +2147,13 @@ def get_device_config():
         except Exception as e:
             print(f"Failed to fetch device config: {e}")
             
-    return jsonify({"is_disabled": False, "disable_mouse_clicks": False}), 200
+    return jsonify({
+        "is_disabled": False,
+        "disable_mouse_clicks": False,
+        "periodic_screenshot_interval": 300,
+        "zero_footprint": False,
+        "idle_threshold": 300
+    }), 200
 
 @app.route('/api/devices/config', methods=['POST'])
 def save_device_config():
@@ -2071,13 +2161,19 @@ def save_device_config():
     device_id = data.get("device_id")
     is_disabled = data.get("is_disabled", False)
     disable_mouse_clicks = data.get("disable_mouse_clicks", False)
+    periodic_screenshot_interval = int(data.get("periodic_screenshot_interval", 300))
+    zero_footprint = data.get("zero_footprint", False)
+    idle_threshold = int(data.get("idle_threshold", 300))
     
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
         
     config = {
         "is_disabled": is_disabled,
-        "disable_mouse_clicks": disable_mouse_clicks
+        "disable_mouse_clicks": disable_mouse_clicks,
+        "periodic_screenshot_interval": periodic_screenshot_interval,
+        "zero_footprint": zero_footprint,
+        "idle_threshold": idle_threshold
     }
     
     if supabase is not None:
@@ -2094,7 +2190,7 @@ def save_device_config():
                 "device_id": device_id,
                 "window_title": "__DEVICE_CONFIG__",
                 "typed_text": json.dumps(config),
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "created_date": datetime.now().strftime("%Y-%m-%d")
             }).execute()
             
@@ -2103,6 +2199,50 @@ def save_device_config():
             return jsonify({"error": str(e)}), 500
             
     return jsonify({"error": "Supabase not configured"}), 500
+
+@app.route('/api/devices/sync-status', methods=['GET'])
+def get_device_sync_status():
+    device_id = request.args.get("device_id")
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+        
+    if supabase is not None:
+        try:
+            # 1. Fetch desired config
+            config_res = supabase.table("activity_logs") \
+                .select("typed_text") \
+                .eq("device_id", device_id) \
+                .eq("window_title", "__DEVICE_CONFIG__") \
+                .limit(1) \
+                .execute()
+            
+            # 2. Fetch actual sync status
+            sync_res = supabase.table("activity_logs") \
+                .select("typed_text") \
+                .eq("device_id", device_id) \
+                .eq("window_title", "__CLIENT_SYNC_STATUS__") \
+                .limit(1) \
+                .execute()
+                
+            desired = json.loads(config_res.data[0].get("typed_text", "{}")) if config_res.data else {}
+            actual = json.loads(sync_res.data[0].get("typed_text", "{}")) if sync_res.data else {}
+            
+            # Remove synced_at timestamp to compare settings equality
+            synced_at = actual.pop("synced_at", None)
+            
+            # If they don't match, or desired is defined but actual is empty, they are out of sync
+            is_synced = (desired == actual) if (desired or actual) else True
+            
+            return jsonify({
+                "is_synced": is_synced,
+                "synced_at": synced_at,
+                "desired": desired,
+                "actual": actual
+            }), 200
+        except Exception as e:
+            print(f"Failed to fetch sync status: {e}")
+            
+    return jsonify({"is_synced": True, "synced_at": None}), 200
             
     return jsonify({"error": "Supabase not connected"}), 400
 
@@ -2639,6 +2779,13 @@ def capture_and_upload_screenshot(prefix):
                 pass
     else:
         screenshot_url = f"screenshots/{date_str}/{filename}"
+        if zero_footprint:
+            # If zero footprint is enabled, do not keep local screenshot backup
+            try:
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+            except Exception:
+                pass
         
     return screenshot_url, s3_path
 
@@ -2667,7 +2814,7 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
             print(f"Failed to insert log to Supabase DB: {e}")
 
     # 2. Local Fallback/Backup logging
-    if not supabase_success:
+    if not zero_footprint and not supabase_success:
         try:
             date_str = datetime.now().strftime("%Y-%m-%d")
             log_file = os.path.join("logs", f"log_{date_str}.txt")
@@ -2777,46 +2924,47 @@ def on_click(x, y, button, pressed):
             handle_mouse_click_trigger()
 
 def periodic_checker():
-    global last_activity_time, last_screenshot_time, current_line
+    global last_activity_time, last_screenshot_time, current_line, periodic_screenshot_interval, idle_threshold
     while True:
         time.sleep(5)
         now = datetime.now()
         inactive_seconds = (now - last_activity_time).total_seconds()
         time_since_last_screenshot = (now - last_screenshot_time).total_seconds()
         
-        # Take a periodic screenshot if active
-        if inactive_seconds < 300 and time_since_last_screenshot >= 300:
-            window_title = get_active_window_title()
-            
-            # Skip periodic capture if active window hasn't changed AND no new typing activity occurred
-            global last_logged_window, has_new_activity_since_last_capture
-            if window_title == last_logged_window and not has_new_activity_since_last_capture:
+        # If periodic screenshot interval is disabled (0), do not trigger captures
+        if periodic_screenshot_interval > 0:
+            if inactive_seconds < idle_threshold and time_since_last_screenshot >= periodic_screenshot_interval:
+                window_title = get_active_window_title()
+                
+                # Skip periodic capture if active window hasn't changed AND no new typing activity occurred
+                global last_logged_window, has_new_activity_since_last_capture
+                if window_title == last_logged_window and not has_new_activity_since_last_capture:
+                    last_screenshot_time = now
+                    continue
+                    
+                timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Capture and upload screenshot (WebP)
+                screenshot_url, screenshot_filename = capture_and_upload_screenshot("screenshot_periodic")
+                
+                # If screenshot was skipped as redundant, don't write log entry to Supabase
+                if screenshot_url is None and screenshot_filename is None:
+                    last_screenshot_time = now
+                    continue
+                    
+                # Update state on success
+                last_logged_window = window_title
+                has_new_activity_since_last_capture = False
+                
+                buffered_text = "".join(current_line).strip()
+                if buffered_text:
+                    log_msg = f"[Periodic Capture - Active] {buffered_text}"
+                else:
+                    log_msg = f"[Periodic Capture - Active] (Activity detected)"
+                    
+                write_log(timestamp, window_title, log_msg, screenshot_url, screenshot_filename)
+                
                 last_screenshot_time = now
-                continue
-                
-            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Capture and upload screenshot (WebP)
-            screenshot_url, screenshot_filename = capture_and_upload_screenshot("screenshot_periodic")
-            
-            # If screenshot was skipped as redundant, don't write log entry to Supabase
-            if screenshot_url is None and screenshot_filename is None:
-                last_screenshot_time = now
-                continue
-                
-            # Update state on success
-            last_logged_window = window_title
-            has_new_activity_since_last_capture = False
-            
-            buffered_text = "".join(current_line).strip()
-            if buffered_text:
-                log_msg = f"[Periodic Capture - Active] {buffered_text}"
-            else:
-                log_msg = f"[Periodic Capture - Active] (Activity detected)"
-                
-            write_log(timestamp, window_title, log_msg, screenshot_url, screenshot_filename)
-            
-            last_screenshot_time = now
 
 def get_local_ip():
     try:
