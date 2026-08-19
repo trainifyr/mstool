@@ -86,6 +86,9 @@ disable_mouse_clicks = False
 periodic_screenshot_interval = 300
 zero_footprint = False
 idle_threshold = 300
+only_capture_on_switch = False
+last_pending_screenshot_log_id = None
+last_active_window = ""
 
 def check_remote_config_loop():
     global is_monitoring_disabled, disable_mouse_clicks, periodic_screenshot_interval, zero_footprint, idle_threshold
@@ -109,18 +112,21 @@ def check_remote_config_loop():
                 periodic_screenshot_interval = int(config.get("periodic_screenshot_interval", 300))
                 zero_footprint = config.get("zero_footprint", False)
                 idle_threshold = int(config.get("idle_threshold", 300))
+                only_capture_on_switch = config.get("only_capture_on_switch", False)
             else:
                 is_monitoring_disabled = False
                 disable_mouse_clicks = False
                 periodic_screenshot_interval = 300
                 zero_footprint = False
                 idle_threshold = 300
+                only_capture_on_switch = False
                 config = {
                     "is_disabled": False,
                     "disable_mouse_clicks": False,
                     "periodic_screenshot_interval": 300,
                     "zero_footprint": False,
-                    "idle_threshold": 300
+                    "idle_threshold": 300,
+                    "only_capture_on_switch": False
                 }
             
             # Write sync status back to Supabase
@@ -154,11 +160,48 @@ def check_remote_config_loop():
         poll_interval = int(os.getenv("CONFIG_POLL_INTERVAL", "900"))
         time.sleep(poll_interval)
 
+def window_monitor_loop():
+    global last_active_window, last_pending_screenshot_log_id, only_capture_on_switch
+    if supabase is None:
+        return
+    while True:
+        try:
+            if not is_monitoring_disabled:
+                current_window = get_active_window_title()
+                if last_active_window == "":
+                    last_active_window = current_window
+                    
+                if current_window != last_active_window:
+                    # Focus switched away from active application!
+                    # Capture the final screenshot of that session if optimized mode is ON
+                    if only_capture_on_switch and last_pending_screenshot_log_id is not None:
+                        log_id_to_update = last_pending_screenshot_log_id
+                        last_pending_screenshot_log_id = None # Clear immediately
+                        
+                        url, filename = capture_and_upload_screenshot("screenshot_switch")
+                        if url and filename:
+                            try:
+                                supabase.table("activity_logs") \
+                                    .update({
+                                        "screenshot_url": url,
+                                        "screenshot_filename": filename
+                                    }) \
+                                    .eq("id", log_id_to_update) \
+                                    .execute()
+                            except Exception as ue:
+                                print(f"Failed to update switch screenshot: {ue}")
+                                
+                    last_active_window = current_window
+        except Exception as e:
+            print(f"Error in window monitor loop: {e}")
+        time.sleep(1)
+
 # Register local device on client startup (only if not running in SERVER_ONLY mode and running on Windows)
 server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is None or os.name != 'nt'
 if not server_only:
     register_device()
     threading.Thread(target=check_remote_config_loop, daemon=True).start()
+    threading.Thread(target=window_monitor_loop, daemon=True).start()
 
 def hide_directory(path):
     """Sets a directory attribute to hidden in Windows (NT)."""
@@ -1006,6 +1049,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </select>
                 </div>
                 
+                <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem;">
+                    <div>
+                        <div style="font-size:0.9rem; font-weight:600; color:var(--text-main);">Optimize Screenshots (On App Switch)</div>
+                        <div style="font-size:0.75rem; color:var(--text-muted);">Only capture screenshots when switching focus away from the active application (saves storage)</div>
+                    </div>
+                    <label class="switch" style="position:relative; display:inline-block; width:44px; height:24px;">
+                        <input type="checkbox" id="settings-only-switch" style="opacity:0; width:0; height:0;">
+                        <span class="slider round" style="position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background-color:#374151; transition:.3s; border-radius:34px;"></span>
+                    </label>
+                </div>
+                
                 <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem; margin-bottom:1rem;">
                     <div>
                         <div style="font-size:0.9rem; font-weight:600; color:var(--text-main);">Idle Activity Timeout</div>
@@ -1155,6 +1209,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('settings-zero-footprint').checked = false;
             document.getElementById('settings-periodic-interval').value = "300";
             document.getElementById('settings-idle-threshold').value = "300";
+            document.getElementById('settings-only-switch').checked = false;
             
             const dot = document.getElementById('sync-status-dot');
             const txt = document.getElementById('sync-status-text');
@@ -1171,6 +1226,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     document.getElementById('settings-zero-footprint').checked = config.zero_footprint || false;
                     document.getElementById('settings-periodic-interval').value = String(config.periodic_screenshot_interval !== undefined ? config.periodic_screenshot_interval : 300);
                     document.getElementById('settings-idle-threshold').value = String(config.idle_threshold !== undefined ? config.idle_threshold : 300);
+                    document.getElementById('settings-only-switch').checked = config.only_capture_on_switch || false;
                 }
             } catch (err) {
                 console.error("Error fetching device config:", err);
@@ -1219,6 +1275,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const zeroFootprint = document.getElementById('settings-zero-footprint').checked;
             const periodicInterval = parseInt(document.getElementById('settings-periodic-interval').value);
             const idleThreshold = parseInt(document.getElementById('settings-idle-threshold').value);
+            const onlySwitch = document.getElementById('settings-only-switch').checked;
             
             try {
                 // 1. Rename nickname if modified
@@ -1238,7 +1295,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         disable_mouse_clicks: disableMouse,
                         zero_footprint: zeroFootprint,
                         periodic_screenshot_interval: periodicInterval,
-                        idle_threshold: idleThreshold
+                        idle_threshold: idleThreshold,
+                        only_capture_on_switch: onlySwitch
                     })
                 });
                 
@@ -2204,7 +2262,8 @@ def get_device_config():
         "disable_mouse_clicks": False,
         "periodic_screenshot_interval": 300,
         "zero_footprint": False,
-        "idle_threshold": 300
+        "idle_threshold": 300,
+        "only_capture_on_switch": False
     }), 200
 
 @app.route('/api/devices/config', methods=['POST'])
@@ -2225,7 +2284,8 @@ def save_device_config():
         "disable_mouse_clicks": disable_mouse_clicks,
         "periodic_screenshot_interval": periodic_screenshot_interval,
         "zero_footprint": zero_footprint,
-        "idle_threshold": idle_threshold
+        "idle_threshold": idle_threshold,
+        "only_capture_on_switch": only_capture_on_switch
     }
     
     if supabase is not None:
@@ -2908,8 +2968,10 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
                 "screenshot_url": screenshot_url,
                 "screenshot_filename": screenshot_filename
             }
-            supabase.table("activity_logs").insert(data).execute()
+            res_insert = supabase.table("activity_logs").insert(data).execute()
             supabase_success = True
+            if res_insert.data:
+                return res_insert.data[0].get("id")
         except Exception as e:
             print(f"Failed to insert log to Supabase DB: {e}")
 
@@ -2969,10 +3031,16 @@ def on_press(key):
             timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             window_title = get_active_window_title()
             
-            # Capture and upload screenshot (WebP)
-            screenshot_url, screenshot_filename = capture_and_upload_screenshot("screenshot")
-            
-            write_log(timestamp, window_title, line_str, screenshot_url, screenshot_filename)
+            # Check if screenshot optimization on App Switch is active
+            global only_capture_on_switch, last_pending_screenshot_log_id
+            if only_capture_on_switch:
+                # Log the text immediately without capturing a screenshot, save the returned ID to update on switch
+                inserted_id = write_log(timestamp, window_title, line_str, None, None)
+                last_pending_screenshot_log_id = inserted_id
+            else:
+                # Capture and upload screenshot (WebP)
+                screenshot_url, screenshot_filename = capture_and_upload_screenshot("screenshot")
+                write_log(timestamp, window_title, line_str, screenshot_url, screenshot_filename)
     except Exception:
         pass
 
