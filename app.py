@@ -839,6 +839,60 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
             100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
         }
+        
+        /* Modal Lightbox Visual Arrows */
+        .modal-arrow {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            background-color: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: #ffffff;
+            width: 54px;
+            height: 54px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.25s ease;
+            z-index: 2100;
+            outline: none;
+            backdrop-filter: blur(4px);
+        }
+        
+        .modal-arrow:hover {
+            background-color: rgba(15, 23, 42, 0.95);
+            border-color: #ffffff;
+            transform: translateY(-50%) scale(1.08);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        }
+        
+        .modal-arrow:active {
+            transform: translateY(-50%) scale(0.95);
+        }
+        
+        .modal-arrow-left {
+            left: 2rem;
+        }
+        
+        .modal-arrow-right {
+            right: 2rem;
+        }
+        
+        /* Adjust for smaller screens */
+        @media (max-width: 640px) {
+            .modal-arrow {
+                width: 44px;
+                height: 44px;
+            }
+            .modal-arrow-left {
+                left: 0.75rem;
+            }
+            .modal-arrow-right {
+                right: 0.75rem;
+            }
+        }
     </style>
 </head>
 <body>
@@ -972,7 +1026,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     
     <div id="imgModal" class="modal" onclick="closeModal()">
         <span class="modal-close" onclick="event.stopPropagation(); closeModal();">&times;</span>
-        <div style="position: relative; display: flex; flex-direction: column; align-items: center; gap: 1rem; max-width: 90%; max-height: 90vh;" onclick="event.stopPropagation();">
+        
+        <!-- Left Arrow Button -->
+        <button class="modal-arrow modal-arrow-left" onclick="event.stopPropagation(); navigateModal(-1);" title="Previous Screenshot">
+            <svg style="width:24px;height:24px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"></path></svg>
+        </button>
+        
+        <!-- Right Arrow Button -->
+        <button class="modal-arrow modal-arrow-right" onclick="event.stopPropagation(); navigateModal(1);" title="Next Screenshot">
+            <svg style="width:24px;height:24px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"></path></svg>
+        </button>
+
+        <div style="position: relative; display: flex; flex-direction: column; align-items: center; gap: 1rem; max-width: 80%; max-height: 90vh;" onclick="event.stopPropagation();">
             <img class="modal-content" id="modalImg" style="max-width: 100%; max-height: 75vh;">
             <button id="modal-delete-btn" class="modal-delete-btn" onclick="deleteModalScreenshot()">Delete Screenshot</button>
         </div>
