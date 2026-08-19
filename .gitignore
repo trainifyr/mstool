@@ -16,3 +16,10 @@ __pycache__/
 # Backups and temporary files
 *.bak
 test_mock.webp
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# Inno Setup output installer files
+user_installer/
