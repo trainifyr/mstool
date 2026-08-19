@@ -2835,6 +2835,14 @@ def capture_and_upload_screenshot(prefix):
         
     return screenshot_url, s3_path
 
+def clean_log_text(text):
+    if not text:
+        return ""
+    for prefix in ["[Periodic Capture - Active] ", "[Mouse Click] "]:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    return text.strip()
+
 def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot_filename=None):
     if is_monitoring_disabled:
         return
@@ -2845,6 +2853,46 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
     if supabase is not None:
         try:
             now_date = datetime.now().strftime("%Y-%m-%d")
+            
+            # Redundancy cleanup: Delete recent log entries in the same window that are superseded by this log
+            try:
+                res = supabase.table("activity_logs") \
+                    .select("id, timestamp, typed_text, screenshot_filename") \
+                    .eq("device_id", device_id) \
+                    .eq("window_title", window_title) \
+                    .neq("window_title", "__DEVICE_CONFIG__") \
+                    .neq("window_title", "__CLIENT_SYNC_STATUS__") \
+                    .order("timestamp", desc=True) \
+                    .limit(5) \
+                    .execute()
+                if res.data:
+                    for old_entry in res.data:
+                        old_id = old_entry["id"]
+                        old_text = old_entry["typed_text"]
+                        old_file = old_entry["screenshot_filename"]
+                        
+                        try:
+                            t1 = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                            t2 = datetime.strptime(old_entry["timestamp"], "%Y-%m-%d %H:%M:%S")
+                            time_diff = abs((t1 - t2).total_seconds())
+                        except Exception:
+                            time_diff = 0
+                            
+                        # If the old log is recent (within 20 minutes) and its text is fully contained in the new log
+                        clean_old = clean_log_text(old_text)
+                        clean_new = clean_log_text(line_str)
+                        if time_diff < 1200 and clean_old and clean_new != clean_old and clean_old in clean_new:
+                            # Delete screenshot from storage
+                            if old_file and SUPABASE_BUCKET:
+                                try:
+                                    supabase.storage.from_(SUPABASE_BUCKET).remove([old_file])
+                                except Exception:
+                                    pass
+                            # Delete database row
+                            supabase.table("activity_logs").delete().eq("id", old_id).execute()
+            except Exception as re:
+                print(f"Failed to perform redundancy check: {re}")
+
             data = {
                 "device_id": device_id,
                 "timestamp": timestamp,
