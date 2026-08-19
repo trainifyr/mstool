@@ -765,6 +765,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="date-selector-wrapper">
                     <button onclick="promptRenameDevice()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem;" title="Rename Device">Rename</button>
                     <button id="toggle-monitor-btn" onclick="toggleDeviceMonitoring()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Pause/Resume Monitoring">Pause Logs</button>
+                    <button onclick="purgeSelectedDateRange()" style="background: none; border: none; color: #ef4444; font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Purge all logs & screenshots for selected date range">Purge Dates</button>
                 </div>
                 <div class="date-selector-wrapper">
                     <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Start Date:</span>
@@ -1108,6 +1109,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 }
             } catch (err) {
                 console.error("Error deleting device:", err);
+            }
+        }
+
+        async function purgeSelectedDateRange() {
+            if (!selectedDevice) return;
+            const message = `Are you sure you want to permanently delete ALL activity logs and screenshots for this device (${selectedDevice}) from ${startDate} to ${endDate}? This action CANNOT be undone and will clear records even if they are not fully loaded in the browser.`;
+            if (!confirm(message)) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/logs/purge-range', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        device_id: selectedDevice,
+                        start_date: startDate,
+                        end_date: endDate
+                    })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    alert(`Purge completed! Successfully deleted ${data.deleted_count || 0} log entries and their associated screenshots.`);
+                    fetchLogs();
+                    fetchScreenshots();
+                } else {
+                    alert("Failed to purge date range.");
+                }
+            } catch (err) {
+                console.error("Error purging date range:", err);
             }
         }
 
@@ -1736,6 +1766,59 @@ def delete_device():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "Supabase not configured"}), 500
+
+@app.route('/api/logs/purge-range', methods=['POST'])
+def purge_range():
+    try:
+        data = request.json
+        device_id = data.get("device_id")
+        start_date = data.get("start_date")
+        end_date = data.get("end_date")
+        
+        if not device_id or not start_date or not end_date:
+            return jsonify({"error": "Device ID, Start Date, and End Date are required"}), 400
+            
+        deleted_count = 0
+        if supabase is not None:
+            try:
+                # 1. Fetch screenshot filenames to delete from Storage
+                res = supabase.table("activity_logs") \
+                    .select("screenshot_filename") \
+                    .eq("device_id", device_id) \
+                    .gte("created_date", start_date) \
+                    .lte("created_date", end_date) \
+                    .execute()
+                    
+                if res.data:
+                    screenshot_files = [
+                        row.get("screenshot_filename")
+                        for row in res.data
+                        if row.get("screenshot_filename")
+                    ]
+                    
+                    if screenshot_files and SUPABASE_BUCKET:
+                        for i in range(0, len(screenshot_files), 100):
+                            batch = screenshot_files[i:i+100]
+                            try:
+                                supabase.storage.from_(SUPABASE_BUCKET).remove(batch)
+                            except Exception:
+                                pass
+                                
+                # 2. Delete database rows
+                del_res = supabase.table("activity_logs") \
+                    .delete() \
+                    .eq("device_id", device_id) \
+                    .gte("created_date", start_date) \
+                    .lte("created_date", end_date) \
+                    .execute()
+                    
+                deleted_count = len(del_res.data) if del_res.data else 0
+            except Exception as e:
+                print(f"Failed to purge date range from Supabase: {e}")
+                
+        return jsonify({"status": "success", "deleted_count": deleted_count}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/devices/toggle-monitoring', methods=['POST'])
 def toggle_device_monitoring():
