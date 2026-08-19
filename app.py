@@ -935,12 +935,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); z-index:2000; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition: opacity 0.2s ease;">
         <div class="modal-content" style="background:var(--bg-card); border:1px solid var(--border); border-radius:12px; width:450px; max-width:90%; padding:1.5rem; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem; border-bottom:1px solid var(--border); padding-bottom:0.75rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem; border-bottom:1px solid var(--border); padding-bottom:0.75rem;">
                 <h3 style="margin:0; font-size:1.15rem; color:var(--text-main);">Device Settings</h3>
                 <button onclick="closeSettingsModal()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:1.25rem;">&times;</button>
             </div>
             
-            <div style="display:flex; flex-direction:column; gap:1.25rem;">
+            <div style="margin-bottom: 1.25rem; padding: 0.75rem; border-radius: 8px; background-color: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); font-size: 0.85rem; font-weight: 500; display: flex; align-items: center; gap: 0.5rem;" id="settings-sync-status">
+                <span style="height: 8px; width: 8px; border-radius: 50%; display: inline-block; background-color: var(--live);" id="sync-status-dot"></span>
+                <span id="sync-status-text" style="color: var(--text-main);">Checking sync status...</span>
+            </div>
+            
+            <div style="display:flex; flex-direction:column; gap:1.25rem; max-height: 55vh; overflow-y: auto; padding-right: 0.25rem; margin-bottom: 1rem;">
                 <div>
                     <label style="display:block; font-size:0.85rem; color:var(--text-muted); margin-bottom:0.5rem; font-weight:500;">Device ID</label>
                     <input type="text" id="settings-device-id" disabled style="width:100%; background:var(--bg-main); border:1px solid var(--border); padding:0.5rem; border-radius:6px; color:var(--text-muted); font-size:0.9rem;">
@@ -962,7 +967,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </label>
                 </div>
                 
-                <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem; margin-bottom:1rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem;">
                     <div>
                         <div style="font-size:0.9rem; font-weight:600; color:var(--text-main);">Disable Mouse Click Screenshots</div>
                         <div style="font-size:0.75rem; color:var(--text-muted);">Disable rate-limited screenshot captures on mouse clicks</div>
@@ -971,6 +976,44 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <input type="checkbox" id="settings-disable-mouse" style="opacity:0; width:0; height:0;">
                         <span class="slider round" style="position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background-color:#374151; transition:.3s; border-radius:34px;"></span>
                     </label>
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem;">
+                    <div>
+                        <div style="font-size:0.9rem; font-weight:600; color:var(--text-main);">Zero Local Footprint</div>
+                        <div style="font-size:0.75rem; color:var(--text-muted);">Delete screenshots and skip backup text logs locally</div>
+                    </div>
+                    <label class="switch" style="position:relative; display:inline-block; width:44px; height:24px;">
+                        <input type="checkbox" id="settings-zero-footprint" style="opacity:0; width:0; height:0;">
+                        <span class="slider round" style="position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background-color:#374151; transition:.3s; border-radius:34px;"></span>
+                    </label>
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem;">
+                    <div>
+                        <div style="font-size:0.9rem; font-weight:600; color:var(--text-main);">Periodic Screenshots</div>
+                        <div style="font-size:0.75rem; color:var(--text-muted);">Interval between automated screen grabs</div>
+                    </div>
+                    <select id="settings-periodic-interval" class="date-select" style="width:130px;">
+                        <option value="0">Disabled</option>
+                        <option value="60">1 Minute</option>
+                        <option value="180">3 Minutes</option>
+                        <option value="300">5 Minutes</option>
+                        <option value="600">10 Minutes</option>
+                    </select>
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--border); padding-top:1rem; margin-bottom:1rem;">
+                    <div>
+                        <div style="font-size:0.9rem; font-weight:600; color:var(--text-main);">Idle Activity Timeout</div>
+                        <div style="font-size:0.75rem; color:var(--text-muted);">Time threshold to stop screenshots when user is inactive</div>
+                    </div>
+                    <select id="settings-idle-threshold" class="date-select" style="width:130px;">
+                        <option value="60">1 Minute</option>
+                        <option value="120">2 Minutes</option>
+                        <option value="300">5 Minutes</option>
+                        <option value="600">10 Minutes</option>
+                    </select>
                 </div>
             </div>
             
