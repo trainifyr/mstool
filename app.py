@@ -2900,6 +2900,24 @@ def bulk_delete_logs():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/client/update/app.py', methods=['GET'])
+def get_client_app_update():
+    try:
+        with open("app.py", "r", encoding="utf-8") as f:
+            code = f.read()
+        return code, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception as e:
+        return str(e), 500
+
+@app.route('/api/client/update/watchdog.py', methods=['GET'])
+def get_client_watchdog_update():
+    try:
+        with open("watchdog.py", "r", encoding="utf-8") as f:
+            code = f.read()
+        return code, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception as e:
+        return str(e), 500
+
 current_line = []
 
 def get_active_window_title():

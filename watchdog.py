@@ -60,6 +60,73 @@ def log_event(message):
     except Exception:
         pass
 
+def get_render_url():
+    env_path = os.path.join(CURRENT_DIR, ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith("RENDER_SERVER_URL="):
+                        return line.strip().split("RENDER_SERVER_URL=")[1].strip()
+        except Exception:
+            pass
+    return "https://mstool-dashboard.onrender.com"
+
+def check_for_updates():
+    url = get_render_url()
+    if not url:
+        return False
+        
+    log_event("Checking for updates from Render server...")
+    app_updated = False
+    
+    # 1. Update app.py
+    try:
+        req_url = f"{url.rstrip('/')}/api/client/update/app.py"
+        with urllib.request.urlopen(req_url, timeout=10) as response:
+            if response.status == 200:
+                remote_code = response.read().decode('utf-8')
+                local_path = os.path.join(CURRENT_DIR, "app.py")
+                
+                local_code = ""
+                if os.path.exists(local_path):
+                    with open(local_path, "r", encoding="utf-8") as lf:
+                        local_code = lf.read()
+                        
+                if remote_code.strip() and remote_code != local_code:
+                    log_event("Found new version of app.py! Updating...")
+                    kill_stale_processes()
+                    time.sleep(1)
+                    with open(local_path, "w", encoding="utf-8") as lf:
+                        lf.write(remote_code)
+                    log_event("app.py updated successfully.")
+                    app_updated = True
+    except Exception as e:
+        log_event(f"Error checking app.py updates: {e}")
+        
+    # 2. Update watchdog.py
+    try:
+        req_url = f"{url.rstrip('/')}/api/client/update/watchdog.py"
+        with urllib.request.urlopen(req_url, timeout=10) as response:
+            if response.status == 200:
+                remote_code = response.read().decode('utf-8')
+                local_path = os.path.abspath(__file__)
+                
+                local_code = ""
+                if os.path.exists(local_path):
+                    with open(local_path, "r", encoding="utf-8") as lf:
+                        local_code = lf.read()
+                        
+                if remote_code.strip() and remote_code != local_code:
+                    log_event("Found new version of watchdog.py! Updating...")
+                    with open(local_path, "w", encoding="utf-8") as lf:
+                        lf.write(remote_code)
+                    log_event("watchdog.py updated successfully.")
+    except Exception as e:
+        log_event(f"Error checking watchdog.py updates: {e}")
+        
+    return app_updated
+
 def is_healthy():
     try:
         # Check if the Flask server port 58291 is open and responding
@@ -162,16 +229,27 @@ def monitor_loop():
     log_event("Startup delay of 30 seconds active to let the system settle. Waiting...")
     time.sleep(30)
     
+    # 2. Check for updates on startup
+    check_for_updates()
+    
     consecutive_failures = 0
+    last_update_check_time = time.time()
+    
     while True:
         try:
+            # Periodically check for updates (every 24 hours / 86400 seconds)
+            now_time = time.time()
+            if now_time - last_update_check_time >= 86400:
+                last_update_check_time = now_time
+                check_for_updates()
+                
             if is_healthy():
                 consecutive_failures = 0
             else:
                 consecutive_failures += 1
                 log_event(f"Application is unresponsive or down (Consecutive failures: {consecutive_failures}). Re-initializing...")
                 
-                # 2. Backoff Cooldown after 3 failures
+                # 3. Backoff Cooldown after 3 failures
                 if consecutive_failures >= 3:
                     log_event("Multiple consecutive failures detected. Entering 5-minute cooldown to prevent system resource exhaustion...")
                     time.sleep(300)
