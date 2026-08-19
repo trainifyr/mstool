@@ -159,8 +159,8 @@ def monitor_loop():
     log_event("Watchdog monitoring loop active.")
     
     # 1. Startup Delay
-    log_event("Startup delay of 300 seconds active to let the system settle. Waiting...")
-    time.sleep(300)
+    log_event("Startup delay of 30 seconds active to let the system settle. Waiting...")
+    time.sleep(30)
     
     consecutive_failures = 0
     while True:
