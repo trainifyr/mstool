@@ -151,12 +151,18 @@ if (-not (Test-Path $permEnvPath)) {
     Write-Host "[+] Credentials verified in permanent directory." -ForegroundColor Green
 }
 
-# 5. Copy core application files to permanent directory
+# 5. Copy core application files to permanent directory (only if they are in different folders)
 Write-Host "`n[*] Copying application files to permanent directory..." -ForegroundColor Cyan
 try {
-    Copy-Item -Path (Join-Path $PSScriptRoot "app.py") -Destination (Join-Path $installDir "app.py") -Force
-    Copy-Item -Path (Join-Path $PSScriptRoot "watchdog.py") -Destination (Join-Path $installDir "watchdog.py") -Force
-    Write-Host "[+] Application files copied to $installDir" -ForegroundColor Green
+    $resolvedSrcRoot = (Resolve-Path $PSScriptRoot -ErrorAction SilentlyContinue).Path
+    $resolvedInstallDir = (Resolve-Path $installDir -ErrorAction SilentlyContinue).Path
+    if ($resolvedSrcRoot -ne $resolvedInstallDir) {
+        Copy-Item -Path (Join-Path $PSScriptRoot "app.py") -Destination (Join-Path $installDir "app.py") -Force
+        Copy-Item -Path (Join-Path $PSScriptRoot "watchdog.py") -Destination (Join-Path $installDir "watchdog.py") -Force
+        Write-Host "[+] Application files copied to $installDir" -ForegroundColor Green
+    } else {
+        Write-Host "[+] Running directly from permanent directory, skipping copy." -ForegroundColor Green
+    }
 } catch {
     Write-Host "[-] Failed to copy files to permanent directory: $_" -ForegroundColor Red
     Exit-Installer 1
