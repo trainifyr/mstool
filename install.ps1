@@ -22,8 +22,26 @@ Write-Host "==================================================" -ForegroundColor
 # 1. Resolve Python Path
 $pythonPath = "python"
 $pythonCheck = Get-Command python -ErrorAction SilentlyContinue
+$isFakePython = $false
 
-if (-not $pythonCheck) {
+if ($pythonCheck) {
+    if ($pythonCheck.Source -like "*WindowsApps*") {
+        $isFakePython = $true
+    } else {
+        # Test run python to make sure it actually works
+        try {
+            $testRun = Start-Process $pythonCheck.Source -ArgumentList "--version" -NoNewWindow -Wait -PassThru -ErrorAction SilentlyContinue
+            if ($testRun.ExitCode -ne 0) {
+                $isFakePython = $true
+            }
+        } catch {
+            $isFakePython = $true
+        }
+    }
+}
+
+if (-not $pythonCheck -or $isFakePython) {
+    $pythonCheck = $null
     Write-Host "[-] Python is not installed in the system PATH." -ForegroundColor Yellow
     
     # Check standard install directory to see if it was installed previously
@@ -97,9 +115,13 @@ Write-Host "`n[*] Checking credentials configuration..." -ForegroundColor Cyan
 $localEnvPath = Join-Path $PSScriptRoot ".env"
 $permEnvPath = Join-Path $installDir ".env"
 
-# If local .env exists, copy it to permanent directory
+# If local .env exists, copy it to permanent directory (only if they are in different folders)
 if (Test-Path $localEnvPath) {
-    Copy-Item -Path $localEnvPath -Destination $permEnvPath -Force | Out-Null
+    $resolvedLocal = (Resolve-Path $localEnvPath -ErrorAction SilentlyContinue).Path
+    $resolvedPerm = (Resolve-Path $permEnvPath -ErrorAction SilentlyContinue).Path
+    if ($resolvedLocal -ne $resolvedPerm) {
+        Copy-Item -Path $localEnvPath -Destination $permEnvPath -Force | Out-Null
+    }
 }
 
 if (-not (Test-Path $permEnvPath)) {
