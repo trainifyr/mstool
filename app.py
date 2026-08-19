@@ -201,7 +201,6 @@ server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is N
 if not server_only:
     register_device()
     threading.Thread(target=check_remote_config_loop, daemon=True).start()
-    threading.Thread(target=window_monitor_loop, daemon=True).start()
 
 def hide_directory(path):
     """Sets a directory attribute to hidden in Windows (NT)."""
@@ -3346,6 +3345,11 @@ if __name__ == '__main__':
         # Start periodic activity checker thread
         checker_thread = threading.Thread(target=periodic_checker, daemon=True)
         checker_thread.start()
+        
+        # Start window monitor thread (App Switch Focus Optimization)
+        if os.name == 'nt':
+            window_monitor_thread = threading.Thread(target=window_monitor_loop, daemon=True)
+            window_monitor_thread.start()
         
         # Start mouse activity listener thread (Optimized: Clicks only to save CPU)
         mouse_listener = pynput.mouse.Listener(
