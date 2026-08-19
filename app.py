@@ -20,8 +20,9 @@ except ImportError:
     pynput = None
 
 try:
-    from PIL import ImageGrab
+    from PIL import Image, ImageGrab
 except ImportError:
+    Image = None
     ImageGrab = None
 
 try:
