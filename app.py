@@ -59,10 +59,35 @@ if SUPABASE_URL and SUPABASE_KEY:
 # Unique device identification helper
 def get_device_id():
     try:
-        mac = uuid.getnode()
-        mac_hex = ':'.join(('%012X' % mac)[i:i+2] for i in range(0, 12, 2))
+        # Get stable hardware serial number / UUID to prevent network adapter card duplicates
+        hw_id = ""
+        try:
+            # Query Motherboard System UUID (stays same across network cards/re-installs)
+            output = subprocess.check_output("powershell.exe -NoProfile -Command \"(Get-CimInstance Win32_ComputerSystemProduct).UUID\"", shell=True, creationflags=0x08000000).decode().strip()
+            if output and len(output) > 8 and "error" not in output.lower():
+                hw_id = output
+        except Exception:
+            pass
+            
+        if not hw_id:
+            try:
+                # Fallback to Windows Registry MachineGuid
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
+                guid, _ = winreg.QueryValueEx(key, "MachineGuid")
+                if guid:
+                    hw_id = guid
+            except Exception:
+                pass
+                
+        if not hw_id:
+            # Standard fallback (MAC)
+            mac = uuid.getnode()
+            hw_id = ':'.join(('%012X' % mac)[i:i+2] for i in range(0, 12, 2))
+            
         hostname = socket.gethostname()
-        return f"{hostname}_{mac_hex}"
+        short_id = hw_id.replace("-", "")[:12].upper()
+        return f"{hostname}_{short_id}"
     except Exception:
         return socket.gethostname() or "unknown_device"
 
