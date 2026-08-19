@@ -96,8 +96,8 @@ def check_disabled_status_loop():
             print(f"Failed to check remote disabled status: {e}")
         time.sleep(30)
 
-# Register local device on client startup (only if not running in SERVER_ONLY mode)
-server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is None
+# Register local device on client startup (only if not running in SERVER_ONLY mode and running on Windows)
+server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is None or os.name != 'nt'
 if not server_only:
     register_device()
     threading.Thread(target=check_disabled_status_loop, daemon=True).start()
@@ -1075,10 +1075,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <div class="device-card-name">${escapeHtml(d.nickname || d.device_id)}</div>
                                 <div class="device-card-id">${d.device_id}</div>
                             </div>
-                            <span class="status-badge ${statusClass}">
-                                <span class="status-dot"></span>
-                                ${statusText}
-                            </span>
+                            <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.5rem;">
+                                <span class="status-badge ${statusClass}">
+                                    <span class="status-dot"></span>
+                                    ${statusText}
+                                </span>
+                                <button onclick="event.stopPropagation(); deleteDeviceCard('${d.device_id}')" style="background-color: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.5rem; border-radius: 4px; cursor: pointer; transition: all 0.2s;" title="Delete Device">Delete</button>
+                            </div>
                         </div>
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-top: auto; font-size:0.8rem; color:var(--text-muted); border-top: 1px solid var(--border); padding-top:0.75rem;">
                             <span>Last Active:</span>
@@ -1088,6 +1091,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 `;
             });
             grid.innerHTML = html;
+        }
+
+        async function deleteDeviceCard(deviceId) {
+            if (!confirm(`Are you sure you want to delete the device "${deviceId}"? This will also purge its database activity logs.`)) {
+                return;
+            }
+            try {
+                const res = await fetch(`/api/devices/delete?device_id=${encodeURIComponent(deviceId)}`, {
+                    method: 'DELETE'
+                });
+                if (res.ok) {
+                    await fetchDevices();
+                } else {
+                    alert("Failed to delete device");
+                }
+            } catch (err) {
+                console.error("Error deleting device:", err);
+            }
         }
 
         function selectDeviceDetails(deviceId) {
@@ -1667,12 +1688,54 @@ def rename_device():
         
     if supabase is not None:
         try:
-            supabase.table("devices").update({"nickname": nickname}).eq("device_id", device_id).execute()
+            supabase.table("devices") \
+                .update({"nickname": nickname}) \
+                .eq("device_id", device_id) \
+                .execute()
             return jsonify({"status": "success"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Supabase not configured"}), 500
+
+@app.route('/api/devices/delete', methods=['DELETE'])
+def delete_device():
+    device_id = request.args.get("device_id")
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+        
+    if supabase is not None:
+        try:
+            # 1. Fetch screenshot filenames to purge from Storage
+            res = supabase.table("activity_logs") \
+                .select("screenshot_filename") \
+                .eq("device_id", device_id) \
+                .execute()
+                
+            if res.data:
+                screenshot_files = [
+                    row.get("screenshot_filename")
+                    for row in res.data
+                    if row.get("screenshot_filename")
+                ]
+                
+                # Delete files from storage
+                if screenshot_files and SUPABASE_BUCKET:
+                    for i in range(0, len(screenshot_files), 100):
+                        batch = screenshot_files[i:i+100]
+                        try:
+                            supabase.storage.from_(SUPABASE_BUCKET).remove(batch)
+                        except Exception:
+                            pass
+                            
+            # 2. Delete logs matching the device
+            supabase.table("activity_logs").delete().eq("device_id", device_id).execute()
             
-    return jsonify({"error": "Supabase not connected"}), 400
+            # 3. Delete the device registration row itself
+            supabase.table("devices").delete().eq("device_id", device_id).execute()
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Supabase not configured"}), 500
 
 @app.route('/api/devices/toggle-monitoring', methods=['POST'])
 def toggle_device_monitoring():
