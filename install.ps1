@@ -78,7 +78,7 @@ Write-Host "`n[*] Installing required dependencies (supabase, python-dotenv, pil
 try {
     # Ensure pip is up to date and install requirements
     & $pythonPath -m pip install --upgrade pip --quiet
-    & $pythonPath -m pip install supabase python-dotenv pillow pynput --quiet
+    & $pythonPath -m pip install supabase python-dotenv pillow pynput mss --quiet
     Write-Host "[+] Dependencies verified and installed successfully." -ForegroundColor Green
 } catch {
     Write-Host "[-] Failed to install pip dependencies: $_" -ForegroundColor Red

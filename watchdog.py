@@ -105,7 +105,7 @@ def install():
     # 1. Install pip dependencies
     print("\n[1/3] Ensuring dependencies (flask, pynput, pillow) are installed...")
     try:
-        subprocess.run([PYTHON_EXE, "-m", "pip", "install", "flask", "pynput", "pillow", "supabase", "python-dotenv"], check=True)
+        subprocess.run([PYTHON_EXE, "-m", "pip", "install", "flask", "pynput", "pillow", "supabase", "python-dotenv", "mss"], check=True)
         print("Dependencies verified successfully.")
     except Exception as e:
         print(f"Warning: Dependency installation returned: {e}")

@@ -23,6 +23,12 @@ try:
     from PIL import ImageGrab
 except ImportError:
     ImageGrab = None
+
+try:
+    import mss
+except ImportError:
+    mss = None
+
 from flask import Flask, jsonify, send_from_directory, render_template_string, request
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -1731,8 +1737,17 @@ def capture_and_upload_screenshot(prefix):
     
     # 2. Grab and compress as WebP
     try:
-        # Capture all screens to prevent black screenshot bugs on virtual or multi-monitor configurations
-        screenshot = ImageGrab.grab(all_screens=True)
+        if mss is not None:
+            with mss.mss() as sct:
+                # Capture all screens combined
+                monitor = sct.monitors[0]
+                sct_img = sct.grab(monitor)
+                # Convert raw BGRA bytes from direct GDI to PIL RGB Image
+                screenshot = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+        else:
+            # Fallback to PIL ImageGrab if mss is not available
+            screenshot = ImageGrab.grab(all_screens=True)
+            
         screenshot.save(local_path, "WEBP", quality=60)
     except Exception as e:
         print(f"Failed to capture or save screenshot: {e}")
