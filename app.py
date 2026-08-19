@@ -1942,6 +1942,10 @@ def delete_log():
         if not timestamp or not date_str:
             return jsonify({"error": "Timestamp and Date required"}), 400
             
+        import html
+        if text:
+            text = html.unescape(text).replace("\\'", "'")
+            
         # Try deleting from Supabase
         if supabase is not None:
             try:
@@ -2017,39 +2021,47 @@ def bulk_delete_logs():
         if not targets or not date_str:
             return jsonify({"error": "Logs and Date required"}), 400
             
-        # Delete from Supabase
-        if supabase is not None:
+        # Delete from Supabase in batch
+        if supabase is not None and targets:
             try:
-                for target in targets:
-                    ts = target.get("timestamp")
-                    txt = target.get("text")
-                    
-                    # Get the screenshot filename
+                # Extract arrays for batched matching
+                timestamps = [t.get("timestamp") for t in targets if t.get("timestamp")]
+                texts = [t.get("text") for t in targets if t.get("text")]
+                
+                if timestamps and texts:
+                    # Query all matching screenshot filenames at once
                     res = supabase.table("activity_logs") \
                         .select("screenshot_filename") \
-                        .eq("timestamp", ts) \
-                        .eq("typed_text", txt) \
+                        .in_("timestamp", timestamps) \
+                        .in_("typed_text", texts) \
                         .execute()
                         
                     if res.data:
-                        for row in res.data:
-                            screenshot_file = row.get("screenshot_filename")
-                            if screenshot_file and SUPABASE_BUCKET:
+                        screenshot_files = [
+                            row.get("screenshot_filename")
+                            for row in res.data
+                            if row.get("screenshot_filename")
+                        ]
+                        
+                        # Batch delete from Supabase storage (max 100 at a time)
+                        if screenshot_files and SUPABASE_BUCKET:
+                            for i in range(0, len(screenshot_files), 100):
+                                batch = screenshot_files[i:i+100]
                                 try:
-                                    supabase.storage.from_(SUPABASE_BUCKET).remove([screenshot_file])
+                                    supabase.storage.from_(SUPABASE_BUCKET).remove(batch)
                                 except Exception:
                                     pass
                                     
-                    # Delete the row
+                    # Batch delete rows
                     supabase.table("activity_logs") \
                         .delete() \
-                        .eq("timestamp", ts) \
-                        .eq("typed_text", txt) \
+                        .in_("timestamp", timestamps) \
+                        .in_("typed_text", texts) \
                         .execute()
             except Exception as e:
                 print(f"Failed to bulk delete logs from Supabase: {e}")
                 
-        # Delete from local files
+        # Delete from local files (one read and write pass per file)
         log_files = [
             os.path.join("logs", f"log_{date_str}.txt"),
             "log.txt"
@@ -2061,9 +2073,12 @@ def bulk_delete_logs():
             with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
                 
+            modified = False
             for target in targets:
                 ts = target.get("timestamp")
                 txt = target.get("text")
+                if not ts or not txt:
+                    continue
                 
                 escaped_ts = re.escape(ts)
                 escaped_text = re.escape(txt)
@@ -2083,9 +2098,11 @@ def bulk_delete_logs():
                             except Exception:
                                 pass
                     content = pattern.sub("", content)
+                    modified = True
                     
-            with open(log_file, "w", encoding="utf-8") as f:
-                f.write(content)
+            if modified:
+                with open(log_file, "w", encoding="utf-8") as f:
+                    f.write(content)
                 
         return jsonify({"status": "success", "deleted": len(targets)}), 200
     except Exception as e:
