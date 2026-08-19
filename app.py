@@ -1939,8 +1939,8 @@ def delete_log():
         timestamp = data.get("timestamp")
         text = data.get("text")
         date_str = data.get("date")
-        if not timestamp or not date_str:
-            return jsonify({"error": "Timestamp and Date required"}), 400
+        if not timestamp:
+            return jsonify({"error": "Timestamp required"}), 400
             
         import html
         if text:
@@ -1975,10 +1975,10 @@ def delete_log():
                 print(f"Failed to delete log from Supabase: {e}")
                 
         # Fallback to local logs deletion
-        log_files = [
-            os.path.join("logs", f"log_{date_str}.txt"),
-            "log.txt"
-        ]
+        log_files = []
+        if date_str:
+            log_files.append(os.path.join("logs", f"log_{date_str}.txt"))
+        log_files.append("log.txt")
         
         for log_file in log_files:
             if not os.path.exists(log_file):
@@ -2018,8 +2018,8 @@ def bulk_delete_logs():
         data = request.json
         targets = data.get("logs", [])
         date_str = data.get("date")
-        if not targets or not date_str:
-            return jsonify({"error": "Logs and Date required"}), 400
+        if not targets:
+            return jsonify({"error": "Logs required"}), 400
             
         # Delete from Supabase in batch
         if supabase is not None and targets:
@@ -2062,10 +2062,10 @@ def bulk_delete_logs():
                 print(f"Failed to bulk delete logs from Supabase: {e}")
                 
         # Delete from local files (one read and write pass per file)
-        log_files = [
-            os.path.join("logs", f"log_{date_str}.txt"),
-            "log.txt"
-        ]
+        log_files = []
+        if date_str:
+            log_files.append(os.path.join("logs", f"log_{date_str}.txt"))
+        log_files.append("log.txt")
         
         for log_file in log_files:
             if not os.path.exists(log_file):
