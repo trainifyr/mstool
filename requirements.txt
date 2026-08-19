@@ -1,6 +1,6 @@
 Flask==3.0.2
 pillow==10.2.0
-supabase==2.3.7
+supabase
 python-dotenv==1.0.1
 gunicorn==21.2.0
 pynput==1.7.6
