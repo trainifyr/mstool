@@ -1175,13 +1175,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         let currentModalSrc = '';
         
         function navigateModal(direction) {
-            const allImgs = Array.from(document.querySelectorAll('img[onclick*="openImage"]'));
-            if (allImgs.length === 0) return;
+            const allElements = Array.from(document.querySelectorAll('[onclick*="openImage"]'));
+            if (allElements.length === 0) return;
             
             // Map to absolute URLs for clean comparison
-            const srcs = allImgs.map(img => {
+            const srcs = allElements.map(el => {
                 const tempLink = document.createElement('a');
-                 const match = img.getAttribute('onclick').match(/openImage\\('([^']+)'/);
+                const match = el.getAttribute('onclick').match(/openImage\\('([^']+)'/);
                 tempLink.href = match ? match[1] : '';
                 return tempLink.href;
             });
@@ -1203,7 +1203,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 if (nextIndex >= srcs.length) nextIndex = 0;
                 if (nextIndex < 0) nextIndex = srcs.length - 1;
                 
-                const nextImg = allImgs[nextIndex];
+                const nextImg = allElements[nextIndex];
                 const clickAttr = nextImg.getAttribute('onclick');
                 const matches = clickAttr.match(/openImage\\('([^']*)'(?:\\s*,\\s*'([^']*)')?\\)/);
                 if (matches) {
