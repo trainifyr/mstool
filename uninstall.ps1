@@ -10,11 +10,11 @@ Write-Host "==================================================" -ForegroundColor
 # 1. Stop background processes
 Write-Host "[*] Stopping background activity monitor processes..." -ForegroundColor Cyan
 try {
-    $processes = Get-CimInstance Win32_Process -Filter "Name='python.exe' or Name='pythonw.exe'" -ErrorAction SilentlyContinue
+    $processes = Get-CimInstance Win32_Process -Filter "Name='python.exe' or Name='pythonw.exe' or Name='watchdog.exe'" -ErrorAction SilentlyContinue
     $killedCount = 0
     
     foreach ($p in $processes) {
-        if ($p.CommandLine -like "*watchdog.py*" -or $p.CommandLine -like "*app.py*") {
+        if ($p.CommandLine -like "*watchdog.py*" -or $p.CommandLine -like "*app.py*" -or $p.Name -eq "watchdog.exe") {
             Stop-Process -Id $p.ProcessId -Force
             $killedCount++
         }
