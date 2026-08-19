@@ -604,29 +604,155 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             background-color: #dc2626;
         }
         
-        .no-data {
-            text-align: center;
-            padding: 3rem;
             color: var(--text-muted);
             background-color: var(--bg-card);
             border-radius: 8px;
             border: 1px dashed var(--border);
         }
+
+        /* Device Grid and Navigation */
+        .view-screen {
+            animation: fadeIn 0.2s ease-in-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .device-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 150px;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .device-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent);
+            background-color: var(--bg-hover);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        
+        .device-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+        }
+        
+        .device-card-name {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+        
+        .device-card-id {
+            font-size: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+        
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.25rem 0.6rem;
+            border-radius: 9999px;
+            border: 1px solid transparent;
+        }
+        
+        .status-badge.online {
+            background-color: rgba(16, 185, 129, 0.1);
+            color: var(--live);
+            border-color: rgba(16, 185, 129, 0.2);
+        }
+        
+        .status-badge.offline {
+            background-color: rgba(148, 163, 184, 0.1);
+            color: var(--text-muted);
+            border-color: rgba(148, 163, 184, 0.2);
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .status-badge.online .status-dot {
+            background-color: var(--live);
+            box-shadow: 0 0 8px var(--live);
+            animation: pulse-dot 2s infinite;
+        }
+        
+        .status-badge.offline .status-dot {
+            background-color: var(--text-muted);
+        }
+        
+        @keyframes pulse-dot {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
+    <!-- Landing Page (Monitored Devices Grid) -->
+    <div id="landing-page" class="container view-screen">
+        <header style="margin-bottom: 2.5rem;">
             <div>
                 <h1>MY HOME MY RULE</h1>
-                <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.25rem;">Live Keystroke & Activity Monitor - Monitoring active applications, typed text, and screenshots</p>
+                <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.25rem;">Live Keystroke & Activity Monitor - Monitored Devices Overview</p>
+            </div>
+            <div class="live-status">
+                <span class="live-dot" style="background-color: var(--live); box-shadow: 0 0 8px var(--live); animation: pulse-dot 2s infinite;"></span>
+                ACTIVE MONITOR
+            </div>
+        </header>
+        
+        <h2 style="font-size: 1.2rem; font-weight: 600; margin-bottom: 1.5rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.5rem;">
+            Monitored Devices
+            <span id="device-count-badge" style="background-color: var(--bg-card); color: var(--text-main); font-size: 0.8rem; padding: 0.15rem 0.5rem; border-radius: 9999px; border: 1px solid var(--border);">0</span>
+        </h2>
+        
+        <div id="devices-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem;">
+            <div class="no-data" style="grid-column: 1 / -1;">Loading monitored devices...</div>
+        </div>
+    </div>
+
+    <!-- Detail Page (Keystrokes & Screenshots) -->
+    <div id="detail-page" class="container view-screen" style="display: none;">
+        <header>
+            <div style="display: flex; align-items: center; gap: 1rem;">
+                <button onclick="goBackToDevices()" style="background-color: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); font-size: 0.85rem; font-weight: 600; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 0.5rem; outline: none;">
+                    <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                    Back
+                </button>
+                <div>
+                    <h1 id="detail-device-title" style="font-size: 1.5rem;">Device Details</h1>
+                    <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 0.1rem;" id="detail-device-subtitle">Keystroke logs & screenshots</p>
+                </div>
             </div>
             <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
-                <div class="date-selector-wrapper">
-                    <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Select Device:</span>
+                <div class="date-selector-wrapper" style="display: none;">
                     <select id="device-select" class="date-select" onchange="changeDevice(this.value)"></select>
-                    <button onclick="promptRenameDevice()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0 0.25rem;" title="Rename Device">Rename</button>
-                    <button id="toggle-monitor-btn" onclick="toggleDeviceMonitoring()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0 0.25rem; margin-left: 0.25rem;" title="Pause/Resume Monitoring">Pause Logs</button>
+                </div>
+                <div class="date-selector-wrapper">
+                    <button onclick="promptRenameDevice()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem;" title="Rename Device">Rename</button>
+                    <button id="toggle-monitor-btn" onclick="toggleDeviceMonitoring()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Pause/Resume Monitoring">Pause Logs</button>
                 </div>
                 <div class="date-selector-wrapper">
                     <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Start Date:</span>
@@ -644,8 +770,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </select>
                 </div>
                 <div class="live-status">
-                    <span class="live-dot"></span>
-                    LIVE CONNECTED
+                    <span class="live-dot" id="detail-live-dot"></span>
+                    <span id="detail-live-status-text">LIVE CONNECTED</span>
                 </div>
             </div>
         </header>
@@ -835,28 +961,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const res = await fetch('/api/devices');
                 const devices = await res.json();
                 allDevices = devices;
+                
                 const select = document.getElementById('device-select');
-                
-                const prevSelection = localStorage.getItem('selectedDevice') || select.value || selectedDevice;
-                
                 select.innerHTML = '';
-                devices.forEach(dev => {
+                devices.forEach(d => {
                     const option = document.createElement('option');
-                    option.value = dev.device_id;
-                    option.innerText = dev.nickname || dev.device_id;
+                    option.value = d.device_id;
+                    option.innerText = d.nickname || d.device_id;
                     select.appendChild(option);
                 });
                 
-                if (devices.length > 0) {
-                    if (devices.some(d => d.device_id === prevSelection)) {
-                        selectedDevice = prevSelection;
-                    } else {
-                        selectedDevice = devices[0].device_id;
-                    }
+                renderDevicesGrid(devices);
+                
+                if (selectedDevice && devices.some(d => d.device_id === selectedDevice)) {
                     select.value = selectedDevice;
-                    localStorage.setItem('selectedDevice', selectedDevice);
+                    updateMonitoringButton();
                 }
-                updateMonitoringButton();
             } catch (err) {
                 console.error("Error fetching devices:", err);
             }
@@ -875,7 +995,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         async function promptRenameDevice() {
             if (!selectedDevice) return;
             const select = document.getElementById('device-select');
-            const currentNickname = select.options[select.selectedIndex].text;
+            const currentNickname = select.options[select.selectedIndex] ? select.options[select.selectedIndex].text : selectedDevice;
             
             const newName = prompt("Enter a new nickname for this device:", currentNickname);
             if (newName === null || newName.trim() === '') return;
@@ -888,12 +1008,115 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 });
                 if (res.ok) {
                     await fetchDevices();
+                    const d = allDevices.find(dev => dev.device_id === selectedDevice);
+                    if (d) {
+                        d.nickname = newName.trim();
+                        document.getElementById('detail-device-title').innerText = d.nickname;
+                    }
                 } else {
                     alert("Failed to rename device");
                 }
             } catch (err) {
                 console.error("Error renaming device:", err);
             }
+        }
+        
+        function getRelativeTimeString(dateIso) {
+            if (!dateIso) return "Never active";
+            const date = new Date(dateIso);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / 60000);
+            
+            if (diffMins < 1) return "Just now";
+            if (diffMins < 60) return `${diffMins}m ago`;
+            
+            const diffHours = Math.floor(diffMins / 60);
+            if (diffHours < 24) return `${diffHours}h ago`;
+            
+            const diffDays = Math.floor(diffHours / 24);
+            return `${diffDays}d ago`;
+        }
+
+        function renderDevicesGrid(devices) {
+            const grid = document.getElementById('devices-grid');
+            document.getElementById('device-count-badge').innerText = devices.length;
+            
+            if (devices.length === 0) {
+                grid.innerHTML = '<div class="no-data" style="grid-column: 1 / -1;">No monitored devices registered yet.</div>';
+                return;
+            }
+            
+            let html = '';
+            devices.forEach(d => {
+                const lastActiveDate = new Date(d.last_active);
+                const isOnline = (new Date() - lastActiveDate) < 120000;
+                
+                const statusClass = isOnline ? 'online' : 'offline';
+                const statusText = isOnline ? 'Online' : 'Offline';
+                const relativeActive = getRelativeTimeString(d.last_active);
+                
+                html += `
+                    <div class="device-card" onclick="selectDeviceDetails('${d.device_id}')">
+                        <div class="device-card-header">
+                            <div>
+                                <div class="device-card-name">${escapeHtml(d.nickname || d.device_id)}</div>
+                                <div class="device-card-id">${d.device_id}</div>
+                            </div>
+                            <span class="status-badge ${statusClass}">
+                                <span class="status-dot"></span>
+                                ${statusText}
+                            </span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-top: auto; font-size:0.8rem; color:var(--text-muted); border-top: 1px solid var(--border); padding-top:0.75rem;">
+                            <span>Last Active:</span>
+                            <span style="font-weight: 500; color: var(--text-main);">${relativeActive}</span>
+                        </div>
+                    </div>
+                `;
+            });
+            grid.innerHTML = html;
+        }
+
+        function selectDeviceDetails(deviceId) {
+            selectedDevice = deviceId;
+            localStorage.setItem('selectedDevice', deviceId);
+            document.getElementById('device-select').value = deviceId;
+            
+            const d = allDevices.find(dev => dev.device_id === deviceId);
+            document.getElementById('detail-device-title').innerText = d ? (d.nickname || d.device_id) : deviceId;
+            document.getElementById('detail-device-subtitle').innerText = d ? `Keystroke logs & screenshots for device ${d.device_id}` : `Keystroke logs & screenshots`;
+            
+            document.getElementById('landing-page').style.display = 'none';
+            document.getElementById('detail-page').style.display = 'block';
+            
+            const lastActiveDate = d ? new Date(d.last_active) : new Date();
+            const isOnline = d ? (new Date() - lastActiveDate) < 120000 : false;
+            const dot = document.getElementById('detail-live-dot');
+            const txt = document.getElementById('detail-live-status-text');
+            if (isOnline) {
+                dot.style.backgroundColor = 'var(--live)';
+                txt.innerText = 'ONLINE CONNECTED';
+            } else {
+                dot.style.backgroundColor = 'var(--text-muted)';
+                txt.innerText = 'OFFLINE DISCONNECTED';
+            }
+            
+            selectedLogKeys.clear();
+            selectedScreenshotFilenames.clear();
+            updateMonitoringButton();
+            fetchLogs();
+            fetchScreenshots();
+        }
+
+        function goBackToDevices() {
+            selectedDevice = '';
+            localStorage.removeItem('selectedDevice');
+            
+            document.getElementById('detail-page').style.display = 'none';
+            document.getElementById('landing-page').style.display = 'block';
+            
+            fetchDevices();
         }
         
         function changeDateRange() {
@@ -1320,26 +1543,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('end-date-input').value = endDate;
             
             await fetchDevices();
-            fetchLogs();
-            fetchScreenshots();
+            
+            // Restore navigation view state
+            if (selectedDevice && allDevices.some(d => d.device_id === selectedDevice)) {
+                selectDeviceDetails(selectedDevice);
+            } else {
+                goBackToDevices();
+            }
         }
         init();
         
         // Update loops
         setInterval(() => {
-            if (currentTab === 'logs-tab') {
-                fetchLogs();
+            if (selectedDevice) {
+                if (currentTab === 'logs-tab') {
+                    fetchLogs();
+                } else {
+                    fetchScreenshots();
+                }
             } else {
-                fetchScreenshots();
+                fetchDevices();
             }
         }, 2000);
         
         setInterval(() => {
-            fetchDevices();
-            if (currentTab === 'logs-tab') {
-                fetchScreenshots();
-            } else {
-                fetchLogs();
+            if (selectedDevice) {
+                fetchDevices();
+                if (currentTab === 'logs-tab') {
+                    fetchScreenshots();
+                } else {
+                    fetchLogs();
+                }
             }
         }, 10000);
     </script>
