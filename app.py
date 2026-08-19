@@ -790,6 +790,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <option value="desc">Newest First (Desc)</option>
                     </select>
                 </div>
+                <button onclick="manualRefresh()" style="background-color: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;" title="Refresh Data">
+                    <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 4.79M9 9h9v9"></path></svg>
+                    Refresh
+                </button>
                 <div class="live-status">
                     <span class="live-dot" id="detail-live-dot"></span>
                     <span id="detail-live-status-text">LIVE CONNECTED</span>
@@ -1679,6 +1683,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         init();
         
+        function manualRefresh() {
+            fetchDevices();
+            if (selectedDevice) {
+                fetchLogs();
+                fetchScreenshots();
+            }
+        }
+
         // Update loops
         setInterval(() => {
             if (selectedDevice) {
@@ -1690,7 +1702,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             } else {
                 fetchDevices();
             }
-        }, 2000);
+        }, 10000); // Slowed down auto-refresh to 10 seconds to prevent selection/stutter lags
         
         setInterval(() => {
             if (selectedDevice) {
@@ -1701,7 +1713,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     fetchLogs();
                 }
             }
-        }, 10000);
+        }, 30000); // Background refresh every 30 seconds
     </script>
 </body>
 </html>
