@@ -62,8 +62,8 @@ def log_event(message):
 
 def is_healthy():
     try:
-        # Check if the Flask server port 5000 is open and responding
-        with urllib.request.urlopen("http://127.0.0.1:5000/", timeout=5) as response:
+        # Check if the Flask server port 58291 is open and responding
+        with urllib.request.urlopen("http://127.0.0.1:58291/", timeout=5) as response:
             return response.status == 200
     except Exception:
         return False
@@ -79,9 +79,9 @@ def kill_stale_processes():
         )
         subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, **SUBPROCESS_FLAGS)
         
-        # Free up port 5000 if bound by any other zombie process
+        # Free up port 58291 if bound by any other zombie process
         port_cmd = (
-            "Get-NetTCPConnection -LocalPort 5000 -ErrorAction SilentlyContinue | "
+            "Get-NetTCPConnection -LocalPort 58291 -ErrorAction SilentlyContinue | "
             "ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"
         )
         subprocess.run(["powershell", "-Command", port_cmd], capture_output=True, **SUBPROCESS_FLAGS)
