@@ -2524,11 +2524,7 @@ def on_press(key):
     except Exception:
         pass
 
-def on_mouse_activity(*args):
-    global last_activity_time
-    now = datetime.now()
-    if (now - last_activity_time).total_seconds() > 1:
-        last_activity_time = now
+
 
 def handle_mouse_click_trigger():
     global last_screenshot_time, current_line, last_logged_window, has_new_activity_since_last_capture
@@ -2710,11 +2706,9 @@ if __name__ == '__main__':
         checker_thread = threading.Thread(target=periodic_checker, daemon=True)
         checker_thread.start()
         
-        # Start mouse activity listener thread
+        # Start mouse activity listener thread (Optimized: Clicks only to save CPU)
         mouse_listener = pynput.mouse.Listener(
-            on_move=on_mouse_activity,
-            on_click=on_click,
-            on_scroll=on_mouse_activity
+            on_click=on_click
         )
         mouse_listener.start()
         
