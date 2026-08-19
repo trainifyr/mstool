@@ -61,8 +61,10 @@ def register_device():
     except Exception as e:
         print(f"Failed to register/upsert device in Supabase: {e}")
 
-# Register local device on client startup
-register_device()
+# Register local device on client startup (only if not running in SERVER_ONLY mode)
+server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is None
+if not server_only:
+    register_device()
 
 # Initialize logs and screenshots directories (kept for fallback / temp storage)
 os.makedirs("logs", exist_ok=True)
