@@ -1107,7 +1107,61 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             localStorage.setItem('currentTab', tabId);
         }
         
+        let currentModalSrc = '';
+        
+        function navigateModal(direction) {
+            const allImgs = Array.from(document.querySelectorAll('img[onclick*="openImage"]'));
+            if (allImgs.length === 0) return;
+            
+            // Map to absolute URLs for clean comparison
+            const srcs = allImgs.map(img => {
+                const tempLink = document.createElement('a');
+                 const match = img.getAttribute('onclick').match(/openImage\\('([^']+)'/);
+                tempLink.href = match ? match[1] : '';
+                return tempLink.href;
+            });
+            
+            // Resolve current modal src as absolute
+            const tempLink = document.createElement('a');
+            tempLink.href = currentModalSrc;
+            const currentAbsSrc = tempLink.href;
+            
+            let index = srcs.indexOf(currentAbsSrc);
+            if (index === -1) {
+                // Fallback: match by filename substring
+                const currentFilename = currentAbsSrc.split('/').pop();
+                index = srcs.findIndex(s => s.split('/').pop() === currentFilename);
+            }
+            
+            if (index !== -1) {
+                let nextIndex = index + direction;
+                if (nextIndex >= srcs.length) nextIndex = 0;
+                if (nextIndex < 0) nextIndex = srcs.length - 1;
+                
+                const nextImg = allImgs[nextIndex];
+                const clickAttr = nextImg.getAttribute('onclick');
+                const matches = clickAttr.match(/openImage\\('([^']*)'(?:\\s*,\\s*'([^']*)')?\\)/);
+                if (matches) {
+                    openImage(matches[1], matches[2] || undefined);
+                }
+            }
+        }
+        
+        window.addEventListener('keydown', function(event) {
+            const modal = document.getElementById('imgModal');
+            if (modal && modal.style.display === 'flex') {
+                if (event.key === 'ArrowRight') {
+                    navigateModal(1);
+                } else if (event.key === 'ArrowLeft') {
+                    navigateModal(-1);
+                } else if (event.key === 'Escape') {
+                    closeModal();
+                }
+            }
+        });
+        
         function openImage(src, filename) {
+            currentModalSrc = src;
             const modal = document.getElementById('imgModal');
             const img = document.getElementById('modalImg');
             const deleteBtn = document.getElementById('modal-delete-btn');
