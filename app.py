@@ -1382,12 +1382,23 @@ def get_logs():
                 
             logs = []
             for row in res.data:
+                screenshot_filename = row["screenshot_filename"]
+                screenshot_url = row["screenshot_url"]
+                
+                # Dynamically generate a temporary signed URL if the bucket is private
+                if screenshot_filename and supabase is not None:
+                    try:
+                        signed_res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(screenshot_filename, 3600)
+                        screenshot_url = signed_res.get("signedURL") or signed_res.get("signedUrl") or screenshot_url
+                    except Exception as e:
+                        print(f"Error signing URL: {e}")
+                        
                 logs.append({
                     "timestamp": row["timestamp"],
                     "window": row["window_title"],
                     "text": row["typed_text"],
-                    "screenshot": row["screenshot_url"],
-                    "screenshot_filename": row["screenshot_filename"]
+                    "screenshot": screenshot_url,
+                    "screenshot_filename": screenshot_filename
                 })
             return jsonify(logs)
         except Exception as e:
@@ -1416,9 +1427,20 @@ def get_screenshots():
                 
             screenshot_list = []
             for row in res.data:
+                screenshot_filename = row["screenshot_filename"]
+                screenshot_url = row["screenshot_url"]
+                
+                # Dynamically generate a temporary signed URL if the bucket is private
+                if screenshot_filename and supabase is not None:
+                    try:
+                        signed_res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(screenshot_filename, 3600)
+                        screenshot_url = signed_res.get("signedURL") or signed_res.get("signedUrl") or screenshot_url
+                    except Exception as e:
+                        print(f"Error signing URL: {e}")
+                        
                 screenshot_list.append({
-                    "filename": row["screenshot_filename"],
-                    "url": row["screenshot_url"],
+                    "filename": screenshot_filename,
+                    "url": screenshot_url,
                     "time": row["timestamp"],
                     "window": row["window_title"]
                 })
