@@ -2781,8 +2781,8 @@ def capture_and_upload_screenshot(prefix):
             # Fallback to PIL ImageGrab if mss is not available
             screenshot = ImageGrab.grab(all_screens=True)
             
-        # Omit redundant screenshots if screen has not changed
-        if is_screenshot_redundant(screenshot):
+        # Omit redundant screenshots if screen has not changed (only for background periodic screenshots)
+        if prefix == "screenshot_periodic" and is_screenshot_redundant(screenshot):
             return None, None
             
         # Scale down to standard 1280px width if larger to save disk space
