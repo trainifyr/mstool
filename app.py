@@ -33,6 +33,12 @@ from flask import Flask, jsonify, send_from_directory, render_template_string, r
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
+# Change working directory to the directory of this script to avoid writing to C:\Windows\system32
+try:
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+except Exception:
+    pass
+
 # Load environment variables
 load_dotenv()
 
