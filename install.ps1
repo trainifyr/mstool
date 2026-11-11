@@ -92,11 +92,11 @@ if (-not $pythonCheck -or $isFakePython) {
 }
 
 # 2. Verify and install PIP dependencies
-Write-Host "`n[*] Installing required dependencies (supabase, python-dotenv, pillow, pynput)..." -ForegroundColor Cyan
+Write-Host "`n[*] Installing required dependencies (boto3, python-dotenv, pillow, pynput)..." -ForegroundColor Cyan
 try {
     # Ensure pip is up to date and install requirements
     & $pythonPath -m pip install --upgrade pip --quiet
-    & $pythonPath -m pip install supabase python-dotenv pillow pynput mss --quiet
+    & $pythonPath -m pip install boto3 python-dotenv pillow pynput mss --quiet
     Write-Host "[+] Dependencies verified and installed successfully." -ForegroundColor Green
 } catch {
     Write-Host "[-] Failed to install pip dependencies: $_" -ForegroundColor Red
@@ -125,30 +125,26 @@ if (Test-Path $localEnvPath) {
 }
 
 if (-not (Test-Path $permEnvPath)) {
-    if ($Silent) {
-        Write-Host "[-] Supabase configuration not found and running in silent mode. Setup cancelled." -ForegroundColor Red
-        Exit-Installer 1
-    }
-    Write-Host "[*] .env file not found. Let's configure your Supabase connection." -ForegroundColor Yellow
-    $url = Read-Host "Enter your Supabase URL (e.g., https://xxxxx.supabase.co)"
-    $key = Read-Host "Enter your Supabase service_role secret key"
-    
-    if (-not $url -or -not $key) {
-        Write-Host "[-] Invalid credentials provided. Setup cancelled." -ForegroundColor Red
-        Exit-Installer 1
+    $defaultServerUrl = "https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws"
+    $serverUrl = $defaultServerUrl
+    if (-not $Silent) {
+        Write-Host "[*] .env file not found. Central AWS Server URL:" -ForegroundColor Yellow
+        $inputUrl = Read-Host "Enter Central Server URL (press Enter for default: $defaultServerUrl)"
+        if ($inputUrl -and $inputUrl.Trim()) {
+            $serverUrl = $inputUrl.Trim()
+        }
     }
     
     $envContent = @(
-        "# Supabase Credentials Configuration",
-        "SUPABASE_URL=$($url.Trim())",
-        "SUPABASE_KEY=$($key.Trim())",
-        "SUPABASE_BUCKET=screenshots",
+        "# AWS Central Server Configuration",
+        "RENDER_SERVER_URL=$($serverUrl)",
+        "AWS_REGION=ap-south-1",
         "SERVER_ONLY=false"
     )
     $envContent | Out-File -FilePath $permEnvPath -Encoding utf8
-    Write-Host "[+] Credentials saved to permanent directory." -ForegroundColor Green
+    Write-Host "[+] Configuration saved to permanent directory." -ForegroundColor Green
 } else {
-    Write-Host "[+] Credentials verified in permanent directory." -ForegroundColor Green
+    Write-Host "[+] Configuration verified in permanent directory." -ForegroundColor Green
 }
 
 # 5. Copy core application files to permanent directory (only if they are in different folders)

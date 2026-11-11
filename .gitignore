@@ -1,5 +1,7 @@
 # Secrets
 .env
+.EVN
+*.env*
 
 # Local logs and screenshots
 logs/

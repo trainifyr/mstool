@@ -70,7 +70,7 @@ def get_render_url():
                         return line.strip().split("RENDER_SERVER_URL=")[1].strip()
         except Exception:
             pass
-    return "https://mstool-dashboard.onrender.com"
+    return "https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws"
 
 def check_for_updates():
     url = get_render_url()
@@ -172,7 +172,7 @@ def install():
     # 1. Install pip dependencies
     print("\n[1/3] Ensuring dependencies (flask, pynput, pillow) are installed...")
     try:
-        subprocess.run([PYTHON_EXE, "-m", "pip", "install", "flask", "pynput", "pillow", "supabase", "python-dotenv", "mss"], check=True)
+        subprocess.run([PYTHON_EXE, "-m", "pip", "install", "flask", "pynput", "pillow", "boto3", "python-dotenv", "mss"], check=True)
         print("Dependencies verified successfully.")
     except Exception as e:
         print(f"Warning: Dependency installation returned: {e}")
