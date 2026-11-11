@@ -72,6 +72,18 @@ def get_render_url():
             pass
     return "https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws"
 
+def get_device_token():
+    env_path = os.path.join(CURRENT_DIR, ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith("DEVICE_TOKEN="):
+                        return line.strip().split("DEVICE_TOKEN=")[1].strip()
+        except Exception:
+            pass
+    return ""
+
 def check_for_updates():
     url = get_render_url()
     if not url:
@@ -79,11 +91,16 @@ def check_for_updates():
         
     log_event("Checking for updates from Render server...")
     app_updated = False
+    token = get_device_token()
+    headers = {"User-Agent": "MSTool-Watchdog/1.0"}
+    if token:
+        headers["X-Device-Token"] = token
     
     # 1. Update app.py
     try:
         req_url = f"{url.rstrip('/')}/api/client/update/app.py"
-        with urllib.request.urlopen(req_url, timeout=10) as response:
+        req = urllib.request.Request(req_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
             if response.status == 200:
                 remote_code = response.read().decode('utf-8')
                 local_path = os.path.join(CURRENT_DIR, "app.py")
@@ -107,7 +124,8 @@ def check_for_updates():
     # 2. Update watchdog.py
     try:
         req_url = f"{url.rstrip('/')}/api/client/update/watchdog.py"
-        with urllib.request.urlopen(req_url, timeout=10) as response:
+        req = urllib.request.Request(req_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
             if response.status == 200:
                 remote_code = response.read().decode('utf-8')
                 local_path = os.path.abspath(__file__)

@@ -1,22 +1,24 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    MSTool Client Auto-Setup Script
+    MSTool Client Auto-Setup Script (OTP Authenticated)
     Installs and configures the monitoring agent on a Windows client machine.
 
 .DESCRIPTION
-    One-command setup. Run as Administrator for best results.
+    One-command secure setup. Run in PowerShell.
 
     Usage:
+        iex (irm 'https://<LAMBDA_URL>/api/client/update/setup_client.ps1?otp=123456')
+    Or interactive:
         iex (irm 'https://<LAMBDA_URL>/api/client/update/setup_client.ps1')
-    Or locally:
-        powershell -ExecutionPolicy Bypass -File setup_client.ps1
 
 .NOTES
+    - Authenticated with a dynamic one-time setup OTP generated from Dashboard
+    - Upon verification, issues a permanent device authentication token
     - Downloads app.py + watchdog.py from the central Lambda server
     - Installs Python if not found
     - Installs pip dependencies (flask, pynput, pillow, boto3, mss)
-    - Creates .env with RENDER_SERVER_URL pointing to Lambda
+    - Creates .env with RENDER_SERVER_URL and DEVICE_TOKEN
     - Registers watchdog as a silent startup item
     - Zero AWS credentials stored on client - all traffic via HTTPS to Lambda
 #>
@@ -25,6 +27,7 @@
 $LAMBDA_URL   = "https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws"
 $INSTALL_DIR  = "$env:LOCALAPPDATA\MSTool"
 $PYTHON_MIN   = "3.9"
+$PRESET_OTP   = ""
 # ──────────────────────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"
@@ -37,9 +40,56 @@ function Write-Err  { param($msg)     Write-Host "    ✗ $msg" -ForegroundColor
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Magenta
-Write-Host "   MSTool Client Auto-Setup" -ForegroundColor Magenta
+Write-Host "   MSTool Client Auto-Setup (Secure OTP)" -ForegroundColor Magenta
 Write-Host "   Central Server: $LAMBDA_URL" -ForegroundColor DarkGray
 Write-Host "============================================================" -ForegroundColor Magenta
+
+# ── STEP 0: OTP Authentication ────────────────────────────────────────────────
+$otp = $PRESET_OTP
+if (-not $otp -or $otp.Trim() -eq "") {
+    Write-Host "`n[AUTHENTICATION REQUIRED]" -ForegroundColor Yellow
+    Write-Host "Enter the 6-digit Setup OTP generated on your Dashboard:" -ForegroundColor Gray
+    $otp = Read-Host "OTP Code"
+}
+
+$otp = $otp.Trim()
+if ($otp -notmatch "^\d{6}$") {
+    Write-Err "Invalid OTP format! Must be a 6-digit number."
+    exit 1
+}
+
+Write-Host "    Verifying OTP with central server..." -ForegroundColor Gray
+$deviceToken = $null
+try {
+    $uuid = $null
+    try {
+        $uuid = (Get-CimInstance Win32_ComputerSystemProduct).UUID
+    } catch {
+        $uuid = [System.Guid]::NewGuid().ToString()
+    }
+
+    $verifyBody = @{
+        otp = $otp
+        device_id = $uuid
+        hostname = $env:COMPUTERNAME
+    } | ConvertTo-Json
+
+    $verifyRes = Invoke-RestMethod -Uri "$LAMBDA_URL/api/client/verify-otp" `
+        -Method Post `
+        -Body $verifyBody `
+        -ContentType "application/json"
+
+    if ($verifyRes.status -ne "success" -or -not $verifyRes.device_token) {
+        Write-Err "OTP Verification Failed: $($verifyRes.error)"
+        exit 1
+    }
+    $deviceToken = $verifyRes.device_token
+    Write-Ok "OTP Verified! Device authorized successfully."
+} catch {
+    Write-Err "Authentication failed! The OTP is invalid, expired, or already used."
+    Write-Host "    Please generate a fresh OTP on your Dashboard and try again." -ForegroundColor Yellow
+    exit 1
+}
 
 # ── STEP 1: Create install directory ──────────────────────────────────────────
 Write-Step 1 "Creating install directory: $INSTALL_DIR"
@@ -67,8 +117,6 @@ foreach ($cmd in @("python", "python3", "py")) {
 if (-not $python) {
     Write-Warn "Python $PYTHON_MIN+ not found. Downloading installer..."
     $pyInstaller = "$env:TEMP\python_installer.exe"
-    # Python 3.12 stable Windows x64 embeddable zip would be smaller, but
-    # the full installer handles pip + PATH automatically.
     $pyUrl = "https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe"
     try {
         Invoke-WebRequest -Uri $pyUrl -OutFile $pyInstaller -UseBasicParsing
@@ -95,7 +143,10 @@ if (-not (Test-Path $pythonw)) { $pythonw = $python }
 
 # ── STEP 3: Download app.py + watchdog.py from Lambda ─────────────────────────
 Write-Step 3 "Downloading monitoring agent from Lambda server..."
-$headers = @{ "Cache-Control" = "no-cache" }
+$headers = @{
+    "Cache-Control" = "no-cache"
+    "X-Device-Token" = $deviceToken
+}
 try {
     $appCode = Invoke-WebRequest -Uri "$LAMBDA_URL/api/client/update/app.py" -UseBasicParsing -Headers $headers
     Set-Content -Path "$INSTALL_DIR\app.py" -Value $appCode.Content -Encoding UTF8
@@ -122,11 +173,14 @@ $envContent = @"
 # Central AWS Lambda server URL (no credentials needed - all via HTTPS)
 RENDER_SERVER_URL=$LAMBDA_URL
 
+# Device Authentication Token (verified via OTP)
+DEVICE_TOKEN=$deviceToken
+
 # How often to poll for config & remote commands (seconds)
 CONFIG_POLL_INTERVAL=30
 "@
 Set-Content -Path "$INSTALL_DIR\.env" -Value $envContent -Encoding UTF8
-Write-Ok ".env written to $INSTALL_DIR\.env"
+Write-Ok ".env written with secure DEVICE_TOKEN"
 
 # ── STEP 5: Install pip dependencies ──────────────────────────────────────────
 Write-Step 5 "Installing Python dependencies..."
@@ -179,11 +233,11 @@ Write-Host "   ✓ MSTool Client Setup Complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "   Install dir : $INSTALL_DIR" -ForegroundColor Gray
 Write-Host "   Server      : $LAMBDA_URL" -ForegroundColor Gray
+Write-Host "   Device Auth : Token verified & bound" -ForegroundColor Gray
 Write-Host "   Auto-start  : On every login (via Startup folder)" -ForegroundColor Gray
 Write-Host "   Updates     : Automatic (watchdog checks daily)" -ForegroundColor Gray
-Write-Host "   Remote PS   : Enabled (dashboard can run commands)" -ForegroundColor Gray
+Write-Host "   Remote PS   : Enabled" -ForegroundColor Gray
 Write-Host ""
-Write-Host "   The agent will appear in the dashboard within ~1 minute." -ForegroundColor Cyan
+Write-Host "   The agent will appear in your dashboard momentarily." -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Magenta
 Write-Host ""
-

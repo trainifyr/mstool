@@ -12,6 +12,8 @@ try:
 except Exception:
     pass
 import uuid
+import random
+import secrets
 from datetime import datetime, timezone
 
 # Try imports for headless server compatibility (Render)
@@ -133,6 +135,14 @@ def get_device_id():
     except Exception:
         return socket.gethostname() or "unknown_device"
 
+DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "")
+
+def get_client_headers():
+    headers = {"Content-Type": "application/json"}
+    if DEVICE_TOKEN:
+        headers["X-Device-Token"] = DEVICE_TOKEN
+    return headers
+
 def register_device():
     device_id = get_device_id()
     hostname = socket.gethostname() or "Unknown Device"
@@ -158,7 +168,7 @@ def register_device():
             req = urllib.request.Request(
                 f"{server_url.rstrip('/')}/api/client/register",
                 data=json.dumps({"device_id": device_id, "hostname": hostname, "last_active": now_iso}).encode('utf-8'),
-                headers={"Content-Type": "application/json"}
+                headers=get_client_headers()
             )
             with urllib.request.urlopen(req, timeout=10) as r:
                 print(f"Device registered with AWS Central Server: {device_id} ({hostname})")
@@ -193,7 +203,7 @@ def check_remote_config_loop():
                 server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
                 if server_url:
                     try:
-                        req = urllib.request.Request(f"{server_url.rstrip('/')}/api/client/config?device_id={device_id}")
+                        req = urllib.request.Request(f"{server_url.rstrip('/')}/api/client/config?device_id={device_id}", headers=get_client_headers())
                         with urllib.request.urlopen(req, timeout=10) as r:
                             config = json.loads(r.read().decode('utf-8'))
                     except Exception:
@@ -233,7 +243,7 @@ def check_remote_config_loop():
                         req = urllib.request.Request(
                             f"{server_url.rstrip('/')}/api/client/sync-status",
                             data=json.dumps({"device_id": device_id, "sync_status": sync_payload}).encode('utf-8'),
-                            headers={"Content-Type": "application/json"}
+                            headers=get_client_headers()
                         )
                         with urllib.request.urlopen(req, timeout=10) as r:
                             pass
@@ -282,7 +292,7 @@ def _poll_and_run_remote_command(device_id):
 
         # HTTP path: poll from Lambda
         poll_url = f"{server_url.rstrip('/')}/api/client/command/poll?device_id={device_id}"
-        req = urllib.request.Request(poll_url)
+        req = urllib.request.Request(poll_url, headers=get_client_headers())
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode('utf-8'))
         if data.get("has_command"):
@@ -325,7 +335,7 @@ def _run_and_report_command(device_id, command_id, command, via_http=True, serve
             req = urllib.request.Request(
                 f"{server_url.rstrip('/')}/api/client/command/result",
                 data=json.dumps(result_payload).encode('utf-8'),
-                headers={"Content-Type": "application/json"}
+                headers=get_client_headers()
             )
             with urllib.request.urlopen(req, timeout=15) as r:
                 pass
@@ -1110,9 +1120,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
         </header>
         
-        <h2 style="font-size: 1.2rem; font-weight: 600; margin-bottom: 1.5rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.5rem;">
-            Monitored Devices
-            <span id="device-count-badge" style="background-color: var(--bg-card); color: var(--text-main); font-size: 0.8rem; padding: 0.15rem 0.5rem; border-radius: 9999px; border: 1px solid var(--border);">0</span>
+        <h2 style="font-size: 1.2rem; font-weight: 600; margin-bottom: 1.5rem; color: var(--text-muted); display: flex; align-items: center; justify-content: space-between;">
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                Monitored Devices
+                <span id="device-count-badge" style="background-color: var(--bg-card); color: var(--text-main); font-size: 0.8rem; padding: 0.15rem 0.5rem; border-radius: 9999px; border: 1px solid var(--border);">0</span>
+            </div>
+            <button onclick="openOtpModal()" style="background: var(--accent); border: none; color: #fff; padding: 0.45rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 0.4rem; box-shadow: 0 2px 8px rgba(37,99,235,0.3);">
+                <svg style="width: 16px; height: 16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                + Add Device
+            </button>
         </h2>
         
         <div id="devices-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem;">
@@ -1141,6 +1157,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <button onclick="openSettingsModal()" style="background-color: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;" title="Device Settings">
                         <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                         Settings
+                    </button>
+                    <button onclick="openOtpModal()" style="background-color: var(--accent); border: none; color: #fff; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;" title="Add Device (OTP)">
+                        <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                        Add Device
                     </button>
                     <button id="purge-btn" onclick="purgeSelectedDateRange()" style="background: none; border: none; color: #ef4444; font-size: 0.85rem; cursor: pointer; font-weight: 600; padding: 0.25rem 0.5rem; margin-left: 0.25rem;" title="Purge all logs & screenshots for selected timeframe">Purge Today</button>
                 </div>
@@ -1241,6 +1261,50 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div style="position: relative; display: flex; flex-direction: column; align-items: center; gap: 1rem; max-width: 80%; max-height: 90vh;" onclick="event.stopPropagation();">
             <img class="modal-content" id="modalImg" style="max-width: 100%; max-height: 75vh;">
             <button id="modal-delete-btn" class="modal-delete-btn" onclick="deleteModalScreenshot()">Delete Screenshot</button>
+        </div>
+    </div>
+
+    <!-- OTP Setup Modal -->
+    <div id="otp-modal" class="modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:2200; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition: opacity 0.2s ease;">
+        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:12px; width:520px; max-width:92%; padding:1.75rem; box-shadow:0 12px 40px rgba(0,0,0,0.7);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem; border-bottom:1px solid var(--border); padding-bottom:0.75rem;">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                    <svg style="width:20px;height:20px;color:var(--accent);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+                    <h3 style="margin:0; font-size:1.15rem; color:var(--text-main);">Add New Device (OTP Setup)</h3>
+                </div>
+                <button onclick="closeOtpModal()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:1.25rem;">&times;</button>
+            </div>
+            
+            <p style="color:var(--text-muted); font-size:0.85rem; margin-top:0; margin-bottom:1.25rem;">
+                This one-time installation OTP expires in <b id="otp-timer" style="color:#f59e0b;">10:00</b>. It can only be used once to pair a new client machine.
+            </p>
+
+            <div style="text-align:center; padding:1.25rem; background:var(--bg-main); border:1px solid var(--border); border-radius:8px; margin-bottom:1.25rem;">
+                <div style="font-size:0.75rem; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted); margin-bottom:0.4rem;">Setup OTP Code</div>
+                <div id="otp-display" style="font-family:'Cascadia Code',Consolas,monospace; font-size:2.4rem; font-weight:700; letter-spacing:8px; color:#38bdf8;">------</div>
+            </div>
+
+            <div style="margin-bottom:1.25rem;">
+                <div style="font-size:0.85rem; font-weight:600; color:var(--text-main); margin-bottom:0.4rem;">Option 1: One-Click PowerShell Command (Recommended)</div>
+                <div style="display:flex; gap:0.5rem; align-items:center;">
+                    <input type="text" id="otp-cmd-input" readonly style="flex:1; background:var(--bg-main); border:1px solid var(--border); padding:0.55rem; border-radius:6px; color:#e6edf3; font-family:monospace; font-size:0.78rem;" onclick="this.select()">
+                    <button onclick="copyOtpCommand()" id="otp-copy-btn" style="background:var(--accent); border:none; color:#fff; padding:0.55rem 1rem; border-radius:6px; font-size:0.82rem; font-weight:600; cursor:pointer; white-space:nowrap;">Copy</button>
+                </div>
+            </div>
+
+            <div style="margin-bottom:1.25rem; padding:0.75rem; background:rgba(255,255,255,0.03); border-radius:6px; font-size:0.8rem; color:var(--text-muted); line-height:1.5;">
+                <b style="color:var(--text-main);">Option 2: Interactive Prompt:</b> Run <code>iex (irm 'https://.../setup_client.ps1')</code> and type the 6-digit code when prompted on the client screen.
+            </div>
+
+            <div id="otp-status-banner" style="display:flex; align-items:center; gap:0.6rem; padding:0.65rem 0.9rem; border-radius:6px; background:#1e293b; border:1px solid #334155; font-size:0.82rem;">
+                <span class="live-dot" style="background:#38bdf8; width:8px; height:8px;"></span>
+                <span id="otp-status-text" style="color:var(--text-main);">Waiting for client to connect and enter OTP...</span>
+            </div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:1.25rem; border-top:1px solid var(--border); padding-top:1rem;">
+                <button onclick="generateNewOtp()" style="background:none; border:1px solid var(--border); color:var(--text-muted); padding:0.45rem 0.9rem; border-radius:6px; font-size:0.8rem; cursor:pointer;">Generate New OTP</button>
+                <button onclick="closeOtpModal()" style="background:var(--bg-main); border:1px solid var(--border); color:var(--text-main); padding:0.45rem 1.25rem; border-radius:6px; font-size:0.85rem; font-weight:600; cursor:pointer;">Close</button>
+            </div>
         </div>
     </div>
 
@@ -1625,6 +1689,106 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             setTimeout(() => {
                 modal.style.display = 'none';
             }, 200);
+        }
+
+        // ==================== OTP DEVICE SETUP MODAL ====================
+        let currentOtp = '';
+        let otpCountdown = 600;
+        let otpTimerInterval = null;
+        let otpPollInterval = null;
+
+        async function openOtpModal() {
+            const modal = document.getElementById('otp-modal');
+            modal.style.display = 'flex';
+            setTimeout(() => {
+                modal.style.opacity = '1';
+                modal.style.pointerEvents = 'auto';
+            }, 50);
+            await generateNewOtp();
+        }
+
+        function closeOtpModal() {
+            const modal = document.getElementById('otp-modal');
+            modal.style.opacity = '0';
+            modal.style.pointerEvents = 'none';
+            if (otpTimerInterval) { clearInterval(otpTimerInterval); otpTimerInterval = null; }
+            if (otpPollInterval) { clearInterval(otpPollInterval); otpPollInterval = null; }
+            setTimeout(() => { modal.style.display = 'none'; }, 200);
+        }
+
+        async function generateNewOtp() {
+            if (otpTimerInterval) clearInterval(otpTimerInterval);
+            if (otpPollInterval) clearInterval(otpPollInterval);
+
+            document.getElementById('otp-display').innerText = '......';
+            document.getElementById('otp-timer').innerText = '10:00';
+            document.getElementById('otp-timer').style.color = '#f59e0b';
+            document.getElementById('otp-status-text').innerText = 'Generating secure OTP...';
+            document.getElementById('otp-copy-btn').innerText = 'Copy';
+            document.getElementById('otp-status-banner').style.background = '#1e293b';
+            document.getElementById('otp-status-banner').style.border = '1px solid #334155';
+
+            try {
+                const res = await fetch('/api/otp/generate', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    currentOtp = data.otp;
+                    document.getElementById('otp-display').innerText = currentOtp;
+                    
+                    const origin = window.location.origin;
+                    const cmd = `iex (irm '${origin}/api/client/update/setup_client.ps1?otp=${currentOtp}')`;
+                    document.getElementById('otp-cmd-input').value = cmd;
+                    document.getElementById('otp-status-text').innerText = 'Waiting for client to connect and enter OTP...';
+
+                    otpCountdown = data.expires_in || 600;
+                    otpTimerInterval = setInterval(updateOtpCountdown, 1000);
+                    otpPollInterval = setInterval(pollOtpStatus, 3000);
+                } else {
+                    document.getElementById('otp-status-text').innerText = 'Error generating OTP: ' + (data.error || 'Failed');
+                }
+            } catch (err) {
+                document.getElementById('otp-status-text').innerText = 'Error: ' + err.message;
+            }
+        }
+
+        function updateOtpCountdown() {
+            otpCountdown--;
+            if (otpCountdown <= 0) {
+                clearInterval(otpTimerInterval); otpTimerInterval = null;
+                clearInterval(otpPollInterval); otpPollInterval = null;
+                document.getElementById('otp-timer').innerText = 'EXPIRED';
+                document.getElementById('otp-timer').style.color = '#ef4444';
+                document.getElementById('otp-status-text').innerText = 'OTP has expired. Click "Generate New OTP".';
+                return;
+            }
+            const mins = Math.floor(otpCountdown / 60);
+            const secs = otpCountdown % 60;
+            document.getElementById('otp-timer').innerText = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+        }
+
+        async function pollOtpStatus() {
+            if (!currentOtp) return;
+            try {
+                const res = await fetch(`/api/otp/status?otp=${currentOtp}`);
+                const data = await res.json();
+                if (data.status === 'consumed') {
+                    clearInterval(otpPollInterval); otpPollInterval = null;
+                    clearInterval(otpTimerInterval); otpTimerInterval = null;
+                    document.getElementById('otp-status-banner').style.background = 'rgba(16, 185, 129, 0.15)';
+                    document.getElementById('otp-status-banner').style.border = '1px solid #10b981';
+                    document.getElementById('otp-status-text').innerHTML = '<b style="color:#10b981;">✓ Device successfully paired and authenticated!</b>';
+                    fetchDevices();
+                }
+            } catch (e) {}
+        }
+
+        function copyOtpCommand() {
+            const input = document.getElementById('otp-cmd-input');
+            input.select();
+            navigator.clipboard.writeText(input.value);
+            const btn = document.getElementById('otp-copy-btn');
+            btn.innerText = 'Copied!';
+            setTimeout(() => { btn.innerText = 'Copy'; }, 2000);
         }
 
         // ==================== REMOTE POWERSHELL TERMINAL ====================
@@ -2584,7 +2748,7 @@ def get_devices():
     if devices_tbl is not None:
         try:
             res = devices_tbl.scan()
-            items = res.get("Items", [])
+            items = [d for d in res.get("Items", []) if not str(d.get("device_id", "")).startswith("OTP#")]
             items.sort(key=lambda d: d.get("nickname", "").lower())
             return jsonify(items)
         except Exception as e:
@@ -3251,9 +3415,125 @@ def get_client_setup_script():
     try:
         with open("setup_client.ps1", "r", encoding="utf-8") as f:
             code = f.read()
+        preset_otp = request.args.get("otp", "").strip()
+        if preset_otp:
+            code = code.replace('$PRESET_OTP   = ""', f'$PRESET_OTP   = "{preset_otp}"')
         return code, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     except Exception as e:
         return str(e), 500
+
+# ==================== FIRST-TIME SETUP OTP & SECURITY ====================
+def verify_client_token(device_id):
+    """
+    Validates X-Device-Token header against registered device_auth_token in DynamoDB.
+    Returns (True, None) if authorized, or (False, error_response) if unauthorized.
+    """
+    if not device_id or devices_tbl is None:
+        return True, None
+    try:
+        res = devices_tbl.get_item(Key={"device_id": device_id})
+        item = res.get("Item")
+        if item and "device_auth_token" in item:
+            expected = item["device_auth_token"]
+            token = request.headers.get("X-Device-Token") or (request.json or {}).get("device_token")
+            if not token or token != expected:
+                return False, (jsonify({"error": "Unauthorized: Invalid or missing device token"}), 401)
+    except Exception as e:
+        print(f"Token verification error: {e}")
+    return True, None
+
+@app.route('/api/otp/generate', methods=['POST'])
+def generate_install_otp():
+    """Generates a secure 6-digit OTP for first-time client installation (valid 10 mins)."""
+    if devices_tbl is None:
+        return jsonify({"error": "DynamoDB not available"}), 500
+    try:
+        otp = f"{random.randint(100000, 999999):06d}"
+        ttl = int(time.time()) + 600  # 10 minutes
+        item = {
+            "device_id": f"OTP#{otp}",
+            "otp": otp,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "ttl": ttl
+        }
+        devices_tbl.put_item(Item=item)
+        return jsonify({"status": "success", "otp": otp, "expires_in": 600}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/otp/status', methods=['GET'])
+def check_otp_status():
+    """Dashboard polls this to see if the OTP was used/consumed by a client."""
+    otp = request.args.get("otp")
+    if not otp or devices_tbl is None:
+        return jsonify({"error": "Invalid request"}), 400
+    try:
+        res = devices_tbl.get_item(Key={"device_id": f"OTP#{otp}"})
+        item = res.get("Item")
+        if not item:
+            return jsonify({"status": "expired"}), 200
+        return jsonify({"status": item.get("status", "pending")}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/client/verify-otp', methods=['POST'])
+def client_verify_otp():
+    """Client calls this during first-time setup to verify OTP and obtain a permanent device token."""
+    data = request.json or {}
+    otp = str(data.get("otp", "")).strip()
+    device_id = data.get("device_id")
+    hostname = data.get("hostname", "Unknown Device")
+    if not otp or not device_id:
+        return jsonify({"error": "otp and device_id are required"}), 400
+    if devices_tbl is None:
+        return jsonify({"error": "DynamoDB not configured"}), 500
+
+    try:
+        otp_key = f"OTP#{otp}"
+        res = devices_tbl.get_item(Key={"device_id": otp_key})
+        item = res.get("Item")
+        if not item:
+            return jsonify({"status": "error", "error": "Invalid or expired OTP"}), 401
+        if item.get("status") != "pending":
+            return jsonify({"status": "error", "error": "OTP has already been used"}), 401
+        if item.get("ttl", 0) < int(time.time()):
+            return jsonify({"status": "error", "error": "OTP has expired"}), 401
+
+        # Mark OTP as consumed immediately
+        devices_tbl.update_item(
+            Key={"device_id": otp_key},
+            UpdateExpression="SET #s = :c, consumed_by = :did, consumed_at = :cat",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":c": "consumed",
+                ":did": device_id,
+                ":cat": datetime.now(timezone.utc).isoformat()
+            }
+        )
+
+        # Generate a permanent cryptographically secure device auth token
+        device_token = secrets.token_hex(24)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Register device with token
+        devices_tbl.update_item(
+            Key={"device_id": device_id},
+            UpdateExpression="SET device_auth_token = :tok, last_active = :la, nickname = if_not_exists(nickname, :hn)",
+            ExpressionAttributeValues={
+                ":tok": device_token,
+                ":la": now_iso,
+                ":hn": hostname
+            }
+        )
+
+        return jsonify({
+            "status": "success",
+            "device_token": device_token,
+            "device_id": device_id
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 # ==================== CLIENT HTTP PROXY ENDPOINTS (FOR CLIENTS) ====================
 @app.route('/api/client/register', methods=['POST'])
@@ -3264,6 +3544,9 @@ def client_register():
     now_iso = data.get("last_active") or datetime.now(timezone.utc).isoformat()
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
+    ok, err = verify_client_token(device_id)
+    if not ok:
+        return err
     if devices_tbl is not None:
         try:
             devices_tbl.update_item(
@@ -3281,6 +3564,9 @@ def client_get_config():
     device_id = request.args.get("device_id")
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
+    ok, err = verify_client_token(device_id)
+    if not ok:
+        return err
     if devices_tbl is not None:
         try:
             res = devices_tbl.get_item(Key={"device_id": device_id})
@@ -3305,6 +3591,9 @@ def client_post_sync_status():
     sync_status = data.get("sync_status", {})
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
+    ok, err = verify_client_token(device_id)
+    if not ok:
+        return err
     if devices_tbl is not None:
         try:
             devices_tbl.update_item(
@@ -3346,6 +3635,9 @@ def client_poll_command():
     device_id = request.args.get("device_id")
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
+    ok, err = verify_client_token(device_id)
+    if not ok:
+        return err
     if devices_tbl is not None:
         try:
             res = devices_tbl.get_item(Key={"device_id": device_id})
@@ -3377,6 +3669,9 @@ def client_post_command_result():
     exit_code = data.get("exit_code", 0)
     if not device_id or not command_id:
         return jsonify({"error": "device_id and command_id required"}), 400
+    ok, err = verify_client_token(device_id)
+    if not ok:
+        return err
     if devices_tbl is not None:
         try:
             result_obj = {
@@ -3464,6 +3759,9 @@ def client_write_log():
     
     if not device_id or not timestamp:
         return jsonify({"error": "device_id and timestamp required"}), 400
+    ok, err = verify_client_token(device_id)
+    if not ok:
+        return err
         
     if logs_tbl is not None:
         try:
@@ -3607,7 +3905,7 @@ def capture_and_upload_screenshot(prefix):
             req = urllib.request.Request(
                 f"{server_url.rstrip('/')}/api/client/screenshot",
                 data=json.dumps(payload).encode('utf-8'),
-                headers={"Content-Type": "application/json"}
+                headers=get_client_headers()
             )
             with urllib.request.urlopen(req, timeout=15) as r:
                 res_data = json.loads(r.read().decode('utf-8'))
@@ -3723,7 +4021,7 @@ def write_log(timestamp, window_title, line_str, screenshot_url=None, screenshot
                     "screenshot_url": screenshot_url,
                     "screenshot_filename": screenshot_filename
                 }).encode('utf-8'),
-                headers={"Content-Type": "application/json"}
+                headers=get_client_headers()
             )
             with urllib.request.urlopen(req, timeout=10) as r:
                 res_data = json.loads(r.read().decode('utf-8'))
