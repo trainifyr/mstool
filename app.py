@@ -1821,11 +1821,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <span style="font-size:1rem; font-weight:600; color:#e6edf3;">Remote PowerShell</span>
                     <span id="terminal-device-label" style="font-size:0.8rem; color:#8b949e; background:#21262d; padding:2px 8px; border-radius:4px;"></span>
                 </div>
+                <button onclick="clearTerminalHistory()" title="Clear session history from this browser" style="background:none; border:1px solid #30363d; color:#6e7681; cursor:pointer; font-size:0.72rem; padding:2px 8px; border-radius:4px; margin-right:6px;">🗑 Clear</button>
                 <button onclick="closeTerminalModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:1.25rem;">&times;</button>
             </div>
-            <div id="terminal-output" style="font-family:'Cascadia Code','Consolas',monospace; font-size:0.82rem; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.75rem 1rem; min-height:280px; max-height:380px; overflow-y:auto; color:#e6edf3; white-space:pre-wrap; line-height:1.6;">
-                <span style="color:#8b949e;">&#x25BA; Remote PowerShell terminal ready. Commands run on the target device.\n&#x26A1; Real-time execution: client polling active every 0.8s for fast responses.\n</span>
-            </div>
+            <div id="terminal-output" style="font-family:'Cascadia Code','Consolas',monospace; font-size:0.82rem; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.75rem 1rem; min-height:280px; max-height:380px; overflow-y:auto; color:#e6edf3; white-space:pre-wrap; line-height:1.6;"></div>
             <div style="display:flex; gap:0.5rem; align-items:center; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.5rem 0.75rem;">
                 <span style="color:#3fb950; font-family:monospace; font-size:0.9rem; white-space:nowrap;">PS &gt;</span>
                 <input type="text" id="terminal-input" placeholder="Enter PowerShell command (e.g. whoami, hostname, Get-Date)..." onkeydown="if(event.key==='Enter') sendTerminalCommand()"
@@ -2582,11 +2581,103 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         let terminalCurrentCommandId = null;
         let terminalPollCount = 0;
 
+        // ---- localStorage persistence helpers ----
+        function _termHistKey()    { return 'mst_hist_'    + selectedDevice; }
+        function _termPendKey()    { return 'mst_pending_' + selectedDevice; }
+
+        function _saveTermEntry(text, color) {
+            try {
+                const key = _termHistKey();
+                const hist = JSON.parse(localStorage.getItem(key) || '[]');
+                hist.push({ text, color: color || '#e6edf3', ts: Date.now() });
+                // Cap at 300 entries to avoid quota issues
+                if (hist.length > 300) hist.splice(0, hist.length - 300);
+                localStorage.setItem(key, JSON.stringify(hist));
+            } catch(e) {}
+        }
+
+        function _restoreTermHistory() {
+            try {
+                const key = _termHistKey();
+                const hist = JSON.parse(localStorage.getItem(key) || '[]');
+                const out = document.getElementById('terminal-output');
+                hist.forEach(h => {
+                    const span = document.createElement('span');
+                    span.style.color = h.color;
+                    span.textContent = h.text + '\n';
+                    out.appendChild(span);
+                });
+                out.scrollTop = out.scrollHeight;
+            } catch(e) {}
+        }
+
+        function _savePendingCmd(cmdId) {
+            try {
+                if (cmdId) localStorage.setItem(_termPendKey(), cmdId);
+                else localStorage.removeItem(_termPendKey());
+            } catch(e) {}
+        }
+
+        function _loadPendingCmd() {
+            try { return localStorage.getItem(_termPendKey()) || null; }
+            catch(e) { return null; }
+        }
+
+        function clearTerminalHistory() {
+            if (!selectedDevice) return;
+            try {
+                localStorage.removeItem(_termHistKey());
+                localStorage.removeItem(_termPendKey());
+            } catch(e) {}
+            const out = document.getElementById('terminal-output');
+            out.innerHTML = '';
+            terminalLog('► History cleared. Terminal ready.', '#8b949e');
+        }
+        // ---- end persistence helpers ----
+
         function openTerminalModal() {
             if (!selectedDevice) return;
             const d = allDevices.find(dev => dev.device_id === selectedDevice);
             const label = d ? (d.nickname || d.device_id.substring(0, 12) + '...') : selectedDevice;
             document.getElementById('terminal-device-label').innerText = label;
+
+            // Clear the static initial HTML, restore persisted history
+            const out = document.getElementById('terminal-output');
+            out.innerHTML = '';
+            const hist = (() => { try { return JSON.parse(localStorage.getItem(_termHistKey()) || '[]'); } catch(e) { return []; } })();
+            if (hist.length === 0) {
+                // Fresh session — show welcome message (also save it)
+                terminalLog('► Remote PowerShell terminal ready. Commands run on the target device.', '#8b949e');
+                terminalLog('⚡ Real-time execution: client polling active every 0.8s for fast responses.', '#8b949e');
+            } else {
+                // Restore saved history without re-saving (avoid duplicates)
+                hist.forEach(h => {
+                    const span = document.createElement('span');
+                    span.style.color = h.color;
+                    span.textContent = h.text + '\n';
+                    out.appendChild(span);
+                });
+                out.scrollTop = out.scrollHeight;
+                // Show a small "restored" notice (not saved to history)
+                const notice = document.createElement('span');
+                notice.style.color = '#30363d';
+                notice.textContent = '── session restored ──\n';
+                out.appendChild(notice);
+                out.scrollTop = out.scrollHeight;
+            }
+
+            // Resume pending command poll if one was in-flight
+            const pending = _loadPendingCmd();
+            if (pending) {
+                terminalCurrentCommandId = pending;
+                terminalPollCount = 0;
+                document.getElementById('terminal-send-btn').disabled = true;
+                document.getElementById('terminal-send-btn').innerText = 'Waiting...';
+                terminalLog('↻ Resuming poll for command ' + pending.substring(0, 8) + '...', '#8b949e');
+                setTimeout(pollTerminalResult, 400);
+                terminalPollInterval = setInterval(pollTerminalResult, 600);
+            }
+
             const modal = document.getElementById('terminal-modal');
             modal.style.display = 'flex';
             setTimeout(() => {
@@ -2600,6 +2691,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const modal = document.getElementById('terminal-modal');
             modal.style.opacity = '0';
             modal.style.pointerEvents = 'none';
+            // Keep poll alive in background — it will finish and save result
+            // But stop the DOM-update interval since modal is hidden
             if (terminalPollInterval) { clearInterval(terminalPollInterval); terminalPollInterval = null; }
             setTimeout(() => { modal.style.display = 'none'; }, 200);
         }
@@ -2617,11 +2710,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         function terminalLog(text, color) {
             const out = document.getElementById('terminal-output');
-            const span = document.createElement('span');
-            span.style.color = color || '#e6edf3';
-            span.textContent = text + String.fromCharCode(10);
-            out.appendChild(span);
-            out.scrollTop = out.scrollHeight;
+            if (out) {
+                const span = document.createElement('span');
+                span.style.color = color || '#e6edf3';
+                span.textContent = text + '\n';
+                out.appendChild(span);
+                out.scrollTop = out.scrollHeight;
+            }
+            // Persist to localStorage (skip dim separator lines to save space)
+            if (color !== '#30363d') {
+                _saveTermEntry(text, color || '#e6edf3');
+            }
         }
 
         async function sendTerminalCommand() {
@@ -2648,10 +2747,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     terminalLog('✗ Error: ' + (data.error || 'Failed to dispatch'), '#f85149');
                     document.getElementById('terminal-send-btn').disabled = false;
                     document.getElementById('terminal-send-btn').innerText = 'Run';
+                    _savePendingCmd(null);
                     return;
                 }
                 terminalCurrentCommandId = data.command_id;
                 terminalPollCount = 0;
+                _savePendingCmd(data.command_id);
                 terminalLog('📡 Command dispatched (ID: ' + data.command_id.substring(0, 8) + '). Waiting for client to run it...', '#8b949e');
                 // Check immediately at 400ms, then every 600ms for near real-time feedback
                 setTimeout(pollTerminalResult, 400);
@@ -2660,16 +2761,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 terminalLog('✗ Network error: ' + err.message, '#f85149');
                 document.getElementById('terminal-send-btn').disabled = false;
                 document.getElementById('terminal-send-btn').innerText = 'Run';
+                _savePendingCmd(null);
             }
         }
 
         async function pollTerminalResult() {
             terminalPollCount++;
-            if (terminalPollCount > 200) {
+            if (terminalPollCount > 300) {
                 clearInterval(terminalPollInterval); terminalPollInterval = null;
-                terminalLog('⏱ Timeout: No response from device after 2 minutes. Target device may be offline or busy.', '#f85149');
+                terminalLog('⏱ Timeout: No response from device after 3 minutes. Target device may be offline or busy.', '#f85149');
                 document.getElementById('terminal-send-btn').disabled = false;
                 document.getElementById('terminal-send-btn').innerText = 'Run';
+                _savePendingCmd(null);
                 return;
             }
             try {
@@ -2677,6 +2780,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const data = await res.json();
                 if (data.status === 'completed' && data.result) {
                     clearInterval(terminalPollInterval); terminalPollInterval = null;
+                    _savePendingCmd(null);
                     const r = data.result;
                     const exitColor = r.exit_code === 0 ? '#3fb950' : '#f85149';
                     terminalLog('─'.repeat(60), '#30363d');
@@ -2685,11 +2789,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     } else {
                         terminalLog('(no output)', '#8b949e');
                     }
-                    terminalLog(String.fromCharCode(10) + `✓ Exit code: ${r.exit_code}  |  Completed: ${new Date(r.completed_at).toLocaleTimeString()}`, exitColor);
+                    terminalLog('\n✓ Exit code: ' + r.exit_code + '  |  Completed: ' + new Date(r.completed_at).toLocaleTimeString(), exitColor);
                     terminalLog('─'.repeat(60), '#30363d');
-                    document.getElementById('terminal-send-btn').disabled = false;
-                    document.getElementById('terminal-send-btn').innerText = 'Run';
-                    document.getElementById('terminal-input').focus();
+                    const btn = document.getElementById('terminal-send-btn');
+                    if (btn) { btn.disabled = false; btn.innerText = 'Run'; }
+                    const inp = document.getElementById('terminal-input');
+                    if (inp) inp.focus();
                 }
                 // else keep polling (pending/dispatched)
             } catch (err) {
