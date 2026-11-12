@@ -139,11 +139,16 @@ handler = make_lambda_handler(app)
     with open(zip_path, "rb") as f:
         zip_bytes = f.read()
 
+    dashboard_user = os.getenv("DASHBOARD_USER", "admin")
+    dashboard_pass = os.getenv("DASHBOARD_PASS", "admin123")
+
     env_vars = {
         "SERVER_ONLY": "true",
         "S3_BUCKET": bucket_name,
         "DEVICES_TABLE": devices_table,
-        "LOGS_TABLE": logs_table
+        "LOGS_TABLE": logs_table,
+        "DASHBOARD_USER": dashboard_user,
+        "DASHBOARD_PASS": dashboard_pass
     }
 
     try:
@@ -202,6 +207,8 @@ handler = make_lambda_handler(app)
     print("\n==================================================")
     print("   100% AWS DEPLOYMENT SUCCESSFUL!")
     print(f"   Dashboard Live URL: {url_config['FunctionUrl']}")
+    print(f"   Username:           {dashboard_user}")
+    print(f"   Password:           {dashboard_pass}")
     print(f"   DynamoDB Devices:   {devices_table}")
     print(f"   DynamoDB Logs:      {logs_table}")
     print(f"   S3 Screenshot Bucket: {bucket_name}")

