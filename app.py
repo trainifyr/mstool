@@ -404,13 +404,13 @@ if not server_only:
     # Dedicated fast-polling thread for remote PS commands (every 30s)
     def _cmd_poll_loop():
         device_id = get_device_id()
-        time.sleep(35)  # Initial delay offset from config loop
+        time.sleep(5)  # Fast start
         while True:
             try:
                 _poll_and_run_remote_command(device_id)
             except Exception as e:
                 print(f"[RemoteCmd] Loop error: {e}")
-            time.sleep(30)
+            time.sleep(10)  # Check for commands every 10 seconds
     threading.Thread(target=_cmd_poll_loop, daemon=True).start()
 
 def hide_directory(path):
@@ -1429,6 +1429,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <select id="device-select" class="date-select" onchange="changeDevice(this.value)"></select>
                 </div>
                 <div class="date-selector-wrapper">
+                    <button onclick="openTerminalModal()" style="background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid #38bdf8; color: #38bdf8; padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; font-weight: 700; box-shadow: 0 0 12px rgba(56, 189, 248, 0.25); transition: all 0.2s;" title="Open Remote PowerShell Terminal">
+                        <svg style="width:15px;height:15px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                        PowerShell Terminal
+                    </button>
                     <button onclick="openSettingsModal()" style="background-color: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;" title="Device Settings">
                         <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                         Settings
