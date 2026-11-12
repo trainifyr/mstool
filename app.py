@@ -3079,23 +3079,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         async function fetchDevices() {
             try {
-                const res = await fetch('/api/devices');
+                const res = await fetch('/api/devices', { cache: 'no-store' });
+                if (res.status === 401) {
+                    window.location.href = '/login';
+                    return;
+                }
                 const devices = await res.json();
+                if (!Array.isArray(devices)) {
+                    console.error("Unexpected response from /api/devices:", devices);
+                    return;
+                }
                 allDevices = devices;
                 
                 const select = document.getElementById('device-select');
-                select.innerHTML = '';
-                devices.forEach(d => {
-                    const option = document.createElement('option');
-                    option.value = d.device_id;
-                    option.innerText = d.nickname || d.device_id;
-                    select.appendChild(option);
-                });
+                if (select) {
+                    select.innerHTML = '';
+                    devices.forEach(d => {
+                        const option = document.createElement('option');
+                        option.value = d.device_id;
+                        option.innerText = d.nickname || d.device_id;
+                        select.appendChild(option);
+                    });
+                }
                 
                 renderDevicesGrid(devices);
                 
                 if (selectedDevice && devices.some(d => d.device_id === selectedDevice)) {
-                    select.value = selectedDevice;
+                    if (select) select.value = selectedDevice;
                     updateDeviceStatus();
                 }
             } catch (err) {

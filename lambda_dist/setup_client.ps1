@@ -1,0 +1,234 @@
+# MSTool Client Auto-Setup Script - Secure OTP
+# Central AWS Lambda Server: https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws
+
+# ── CONFIGURATION ─────────────────────────────────────────────────────────────
+$LAMBDA_URL   = "https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws"
+$INSTALL_DIR  = "$env:LOCALAPPDATA\MSTool"
+$PYTHON_MIN   = "3.9"
+$PRESET_OTP   = ""
+# ──────────────────────────────────────────────────────────────────────────────
+
+$ErrorActionPreference = "Stop"
+$ProgressPreference    = "SilentlyContinue"
+
+function Write-Step { param($n, $msg) Write-Host "`n[$n] $msg" -ForegroundColor Cyan }
+function Write-Ok   { param($msg)     Write-Host "    ✓ $msg" -ForegroundColor Green }
+function Write-Warn { param($msg)     Write-Host "    ⚠ $msg" -ForegroundColor Yellow }
+function Write-Err  { param($msg)     Write-Host "    ✗ $msg" -ForegroundColor Red }
+
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Magenta
+Write-Host "   MSTool Client Auto-Setup (Secure OTP)" -ForegroundColor Magenta
+Write-Host "   Central Server: $LAMBDA_URL" -ForegroundColor DarkGray
+Write-Host "============================================================" -ForegroundColor Magenta
+
+# ── STEP 0: OTP Authentication ────────────────────────────────────────────────
+$otp = $PRESET_OTP
+if (-not $otp -or $otp.Trim() -eq "") {
+    Write-Host "`n[AUTHENTICATION REQUIRED]" -ForegroundColor Yellow
+    Write-Host "Enter the 6-digit Setup OTP generated on your Dashboard:" -ForegroundColor Gray
+    $otp = Read-Host "OTP Code"
+}
+
+$otp = $otp.Trim()
+if ($otp -notmatch "^\d{6}$") {
+    Write-Err "Invalid OTP format! Must be a 6-digit number."
+    exit 1
+}
+
+Write-Host "    Verifying OTP with central server..." -ForegroundColor Gray
+$deviceToken = $null
+try {
+    $uuid = $null
+    try {
+        $uuid = (Get-CimInstance Win32_ComputerSystemProduct).UUID
+    } catch {
+        $uuid = [System.Guid]::NewGuid().ToString()
+    }
+
+    $verifyBody = @{
+        otp = $otp
+        device_id = $uuid
+        hostname = $env:COMPUTERNAME
+    } | ConvertTo-Json
+
+    $verifyRes = Invoke-RestMethod -Uri "$LAMBDA_URL/api/client/verify-otp" `
+        -Method Post `
+        -Body $verifyBody `
+        -ContentType "application/json"
+
+    if ($verifyRes.status -ne "success" -or -not $verifyRes.device_token) {
+        Write-Err "OTP Verification Failed: $($verifyRes.error)"
+        exit 1
+    }
+    $deviceToken = $verifyRes.device_token
+    $encryptionKey = $verifyRes.encryption_key
+    Write-Ok "OTP Verified! Device authorized successfully."
+} catch {
+    Write-Err "Authentication failed! The OTP is invalid, expired, or already used."
+    Write-Host "    Please generate a fresh OTP on your Dashboard and try again." -ForegroundColor Yellow
+    exit 1
+}
+
+# ── STEP 1: Create install directory ──────────────────────────────────────────
+Write-Step 1 "Creating install directory: $INSTALL_DIR"
+New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
+Write-Ok "Directory ready"
+
+# ── STEP 2: Check / install Python ────────────────────────────────────────────
+Write-Step 2 "Checking for Python $PYTHON_MIN+"
+$python = $null
+foreach ($cmd in @("python", "python3", "py")) {
+    try {
+        $ver = & $cmd --version 2>&1
+        if ($ver -match "Python (\d+\.\d+)") {
+            $found = [version]$Matches[1]
+            if ($found -ge [version]$PYTHON_MIN) {
+                $python = (Get-Command $cmd -ErrorAction SilentlyContinue).Source
+                if (-not $python) { $python = $cmd }
+                Write-Ok "Found: $ver  ($python)"
+                break
+            }
+        }
+    } catch {}
+}
+
+if (-not $python) {
+    Write-Warn "Python $PYTHON_MIN+ not found. Downloading installer..."
+    $pyInstaller = "$env:TEMP\python_installer.exe"
+    $pyUrl = "https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe"
+    try {
+        Invoke-WebRequest -Uri $pyUrl -OutFile $pyInstaller -UseBasicParsing
+        Write-Ok "Installer downloaded"
+        Write-Host "    Installing Python silently (this may take ~2 minutes)..." -ForegroundColor Gray
+        Start-Process -Wait -FilePath $pyInstaller -ArgumentList "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_pip=1"
+        Remove-Item $pyInstaller -Force -ErrorAction SilentlyContinue
+        # Refresh PATH in current session
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "User") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
+        $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+        if (-not $python) { $python = "python" }
+        Write-Ok "Python installed: $($python)"
+    } catch {
+        Write-Err "Failed to install Python automatically."
+        Write-Host "    Please install Python manually from https://python.org and re-run this script." -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Determine pythonw path (windowless)
+$pythonw = $python -replace "python\.exe$", "pythonw.exe"
+if (-not (Test-Path $pythonw)) { $pythonw = $python }
+
+# ── STEP 3: Download app.py + watchdog.py from Lambda ─────────────────────────
+Write-Step 3 "Downloading monitoring agent from Lambda server..."
+$headers = @{
+    "Cache-Control" = "no-cache"
+    "X-Device-Token" = $deviceToken
+}
+try {
+    $appCode = Invoke-WebRequest -Uri "$LAMBDA_URL/api/client/update/app.py" -UseBasicParsing -Headers $headers
+    Set-Content -Path "$INSTALL_DIR\app.py" -Value $appCode.Content -Encoding UTF8
+    Write-Ok "app.py downloaded ($(($appCode.Content).Length) bytes)"
+} catch {
+    Write-Err "Failed to download app.py: $_"
+    exit 1
+}
+try {
+    $wdCode = Invoke-WebRequest -Uri "$LAMBDA_URL/api/client/update/watchdog.py" -UseBasicParsing -Headers $headers
+    Set-Content -Path "$INSTALL_DIR\watchdog.py" -Value $wdCode.Content -Encoding UTF8
+    Write-Ok "watchdog.py downloaded"
+} catch {
+    Write-Err "Failed to download watchdog.py: $_"
+    exit 1
+}
+
+# ── STEP 4: Write .env configuration ──────────────────────────────────────────
+Write-Step 4 "Writing .env configuration"
+$envContent = @"
+# MSTool Client Configuration
+# Auto-generated by setup_client.ps1 on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+
+# Central AWS Lambda server URL (no credentials needed - all via HTTPS)
+RENDER_SERVER_URL=$LAMBDA_URL
+
+# Device Hardware ID
+DEVICE_ID=$uuid
+
+# Device Authentication Token (verified via OTP)
+DEVICE_TOKEN=$deviceToken
+
+# Screenshot Authenticated Encryption Key (AES-256-GCM)
+SCREENSHOT_ENCRYPTION_KEY=$encryptionKey
+
+# How often to poll for config & remote commands (seconds) - Ultra-fast 2s polling
+CONFIG_POLL_INTERVAL=2
+"@
+Set-Content -Path "$INSTALL_DIR\.env" -Value $envContent -Encoding UTF8
+Write-Ok ".env written with secure DEVICE_ID, DEVICE_TOKEN, and SCREENSHOT_ENCRYPTION_KEY"
+
+# ── STEP 5: Install pip dependencies ──────────────────────────────────────────
+Write-Step 5 "Installing Python dependencies..."
+$deps = @("flask", "pynput", "pillow", "boto3", "python-dotenv", "mss", "cryptography")
+try {
+    & $python -m pip install --quiet --upgrade pip
+    & $python -m pip install --quiet @deps
+    Write-Ok "Dependencies installed: $($deps -join ', ')"
+} catch {
+    Write-Warn "pip install warning (may be non-fatal): $_"
+}
+
+# ── STEP 6: Register silent startup via VBScript ──────────────────────────────
+Write-Step 6 "Registering silent startup..."
+$startupFolder = [System.IO.Path]::Combine($env:APPDATA, "Microsoft\Windows\Start Menu\Programs\Startup")
+$vbsPath = Join-Path $startupFolder "start_mstool_watchdog.vbs"
+$vbsContent = @"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """$pythonw"" ""$INSTALL_DIR\watchdog.py""", 0, False
+"@
+try {
+    New-Item -ItemType Directory -Force -Path $startupFolder | Out-Null
+    Set-Content -Path $vbsPath -Value $vbsContent -Encoding ASCII
+    Write-Ok "Startup VBScript created: $vbsPath"
+} catch {
+    Write-Warn "Could not create startup VBScript: $_"
+}
+
+# ── STEP 7: Launch watchdog now ────────────────────────────────────────────────
+Write-Step 7 "Launching monitoring agent (background)..."
+try {
+    # Terminate any legacy or previous monitor processes
+    Get-CimInstance Win32_Process -Filter "Name='python.exe' or Name='pythonw.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*WindowsMonitor*" -or $_.CommandLine -like "*MSTool*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+} catch {}
+try {
+    $proc = Start-Process -FilePath $pythonw -ArgumentList "`"$INSTALL_DIR\watchdog.py`"" `
+        -WorkingDirectory $INSTALL_DIR -WindowStyle Hidden -PassThru
+    Write-Ok "Watchdog started (PID: $($proc.Id))"
+} catch {
+    Write-Warn "Could not start watchdog silently, trying python instead..."
+    try {
+        Start-Process -FilePath $python -ArgumentList "`"$INSTALL_DIR\watchdog.py`"" `
+            -WorkingDirectory $INSTALL_DIR -WindowStyle Hidden
+        Write-Ok "Watchdog started"
+    } catch {
+        Write-Err "Failed to start watchdog: $_"
+    }
+}
+
+# ── DONE ──────────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Magenta
+Write-Host "   ✓ MSTool Client Setup Complete!" -ForegroundColor Green
+Write-Host ""
+Write-Host "   Install dir : $INSTALL_DIR" -ForegroundColor Gray
+Write-Host "   Server      : $LAMBDA_URL" -ForegroundColor Gray
+Write-Host "   Device Auth : Token verified & bound" -ForegroundColor Gray
+Write-Host "   Auto-start  : On every login (via Startup folder)" -ForegroundColor Gray
+Write-Host "   Updates     : Automatic (watchdog checks daily)" -ForegroundColor Gray
+Write-Host "   Remote PS   : Enabled" -ForegroundColor Gray
+Write-Host ""
+Write-Host "   The agent will appear in your dashboard momentarily." -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Magenta
+Write-Host ""

@@ -1,0 +1,12 @@
+apig_wsgi-2.20.0.dist-info/INSTALLER,sha256=zuuue4knoyJ-UwPPXg8fezS7VCrXJQrAP7zeNuwvFQg,4
+apig_wsgi-2.20.0.dist-info/METADATA,sha256=6Pdh1zlWjpaTj7zFOWx9LBwVLTCo3fMjHUrIre6bbf0,6538
+apig_wsgi-2.20.0.dist-info/RECORD,,
+apig_wsgi-2.20.0.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+apig_wsgi-2.20.0.dist-info/WHEEL,sha256=_zCd3N1l69ArxyTb8rzEoP9TpbYXkqRFSNOD5OuxnTs,91
+apig_wsgi-2.20.0.dist-info/licenses/LICENSE,sha256=4jkufUMkMlz_PxJ_HA4V6Ki2LS1wffu3ApXLk3REFkU,1069
+apig_wsgi-2.20.0.dist-info/top_level.txt,sha256=nEYngM8za0ApDEUdHhof2Ac8D2mC7pdN6jJgyYAVV-A,10
+apig_wsgi/__init__.py,sha256=4xxayN0oaajNqxwH_mOrbxtRlEdmuB-exUXpNuG3u8s,12516
+apig_wsgi/__pycache__/__init__.cpython-314.pyc,,
+apig_wsgi/__pycache__/compat.cpython-314.pyc,,
+apig_wsgi/compat.py,sha256=LBrhhklFAW5eS85bjAt4ED15LFGJmVisSsquMrqpWww,924
+apig_wsgi/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0

