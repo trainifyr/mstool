@@ -1356,7 +1356,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
                 <div style="display: flex; align-items: center; gap: 0.75rem;">
                     <span style="font-size: 0.82rem; color: var(--text-muted);">Refreshes in:</span>
-                    <span id="banner-otp-timer" style="font-family: monospace; font-size: 0.95rem; font-weight: 700; color: #f59e0b; background: rgba(245, 158, 11, 0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(245, 158, 11, 0.25);">10:00</span>
+                    <span id="banner-otp-timer" style="font-family: monospace; font-size: 0.95rem; font-weight: 700; color: #38bdf8; background: rgba(56, 189, 248, 0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.25);">01:00</span>
                     <button onclick="refreshBannerOtp()" style="background: rgba(255,255,255,0.06); border: 1px solid var(--border); color: #e2e8f0; font-size: 0.78rem; padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; transition: all 0.2s;" title="Force generate new OTP now">
                         <svg style="width:12px;height:12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 4.79M9 9h9v9"></path></svg>
                         Refresh OTP
@@ -1368,7 +1368,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <!-- OTP Display Box -->
                 <div style="background: #0b1120; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 10px; padding: 1rem 1.5rem; text-align: center; min-width: 170px;">
                     <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1.5px; color: #94a3b8; margin-bottom: 0.3rem; font-weight: 600;">Setup OTP</div>
-                    <div id="banner-otp-display" style="font-family: 'Cascadia Code', Consolas, monospace; font-size: 2rem; font-weight: 800; letter-spacing: 6px; color: #38bdf8;">------</div>
+                    <div id="banner-otp-display" style="font-family: 'Cascadia Code', Consolas, monospace; font-size: 2rem; font-weight: 800; letter-spacing: 6px; color: #38bdf8;">······</div>
                     <div style="font-size: 0.68rem; color: #64748b; margin-top: 0.25rem;">Live code (auto-updates)</div>
                 </div>
 
@@ -1382,8 +1382,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <input type="text" id="banner-otp-cmd" readonly onclick="this.select()"
                             style="flex: 1; background: #0b1120; border: 1px solid #334155; padding: 0.65rem 0.85rem; border-radius: 8px; color: #38bdf8; font-family: 'Cascadia Code', Consolas, monospace; font-size: 0.82rem; outline: none;"
                             value="Generating command...">
-                        <button onclick="copyBannerCmd()" id="banner-copy-btn"
-                            style="background: var(--accent); border: none; color: #fff; padding: 0.65rem 1.25rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all 0.2s; display: flex; align-items: center; gap: 0.4rem; box-shadow: 0 4px 12px rgba(37,99,235,0.4);">
+                        <button onclick="copyBannerCmd()" id="banner-copy-btn" disabled
+                            style="background: var(--accent); border: none; color: #fff; padding: 0.65rem 1.25rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: not-allowed; opacity: 0.5; white-space: nowrap; transition: all 0.2s; display: flex; align-items: center; gap: 0.4rem; box-shadow: 0 4px 12px rgba(37,99,235,0.4);">
                             <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
                             Copy Command
                         </button>
@@ -1764,8 +1764,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             // Map to absolute URLs for clean comparison
             const srcs = allElements.map(el => {
                 const tempLink = document.createElement('a');
-                const match = el.getAttribute('onclick').match(/openImage\\('([^']+)'/);
-                tempLink.href = match ? match[1] : '';
+                const parts = (el.getAttribute('onclick') || '').split("'");
+                tempLink.href = parts.length >= 2 ? parts[1] : '';
                 return tempLink.href;
             });
             
@@ -1787,10 +1787,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 if (nextIndex < 0) nextIndex = srcs.length - 1;
                 
                 const nextImg = allElements[nextIndex];
-                const clickAttr = nextImg.getAttribute('onclick');
-                const matches = clickAttr.match(/openImage\\('([^']*)'(?:\\s*,\\s*'([^']*)')?\\)/);
-                if (matches) {
-                    openImage(matches[1], matches[2] || undefined);
+                const clickAttr = nextImg.getAttribute('onclick') || '';
+                const parts = clickAttr.split("'");
+                if (parts.length >= 2) {
+                    openImage(parts[1], parts.length >= 4 ? parts[3] : undefined);
                 }
             }
         }
@@ -2000,8 +2000,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (otpPollInterval) clearInterval(otpPollInterval);
 
             document.getElementById('otp-display').innerText = '......';
-            document.getElementById('otp-timer').innerText = '10:00';
-            document.getElementById('otp-timer').style.color = '#f59e0b';
+            document.getElementById('otp-timer').innerText = '01:00';
+            document.getElementById('otp-timer').style.color = '#38bdf8';
             document.getElementById('otp-status-text').innerText = 'Generating secure OTP...';
             document.getElementById('otp-copy-btn').innerText = 'Copy';
             document.getElementById('otp-status-banner').style.background = '#1e293b';
@@ -2019,7 +2019,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     document.getElementById('otp-cmd-input').value = cmd;
                     document.getElementById('otp-status-text').innerText = 'Waiting for client to connect and enter OTP...';
 
-                    otpCountdown = data.expires_in || 600;
+                    otpCountdown = data.expires_in || 60;
                     otpTimerInterval = setInterval(updateOtpCountdown, 1000);
                     otpPollInterval = setInterval(pollOtpStatus, 3000);
                 } else {
@@ -2072,63 +2072,137 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         // ==================== LIVE AUTO-REFRESHING BANNER OTP ====================
         let bannerOtp = '';
-        let bannerOtpCountdown = 600;
+        let bannerOtpExpiresAt = 0;
         let bannerOtpTimer = null;
         let bannerOtpPoll = null;
+        let isRefreshingOtp = false;
+        let otpRetryTimeout = null;
+
+        function formatCountdown(totalSecs) {
+            const m = Math.floor(totalSecs / 60);
+            const s = totalSecs % 60;
+            return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+        }
+
+        function setCopyBtnState(enabled, label) {
+            const btn = document.getElementById('banner-copy-btn');
+            if (!btn) return;
+            const svgIcon = '<svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>';
+            btn.innerHTML = `${svgIcon} ${label}`;
+            if (enabled) {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+                btn.style.cursor = 'pointer';
+                btn.style.background = 'var(--accent)';
+            } else {
+                btn.disabled = true;
+                btn.style.opacity = '0.5';
+                btn.style.cursor = 'not-allowed';
+                btn.style.background = 'var(--accent)';
+            }
+        }
 
         async function initBannerOtp() {
             await refreshBannerOtp();
         }
 
         async function refreshBannerOtp() {
-            if (bannerOtpTimer) clearInterval(bannerOtpTimer);
-            if (bannerOtpPoll) clearInterval(bannerOtpPoll);
+            if (isRefreshingOtp) return;
+            isRefreshingOtp = true;
+
+            if (bannerOtpTimer) { clearInterval(bannerOtpTimer); bannerOtpTimer = null; }
+            if (bannerOtpPoll) { clearInterval(bannerOtpPoll); bannerOtpPoll = null; }
+            if (otpRetryTimeout) { clearTimeout(otpRetryTimeout); otpRetryTimeout = null; }
 
             const display = document.getElementById('banner-otp-display');
             const timerEl = document.getElementById('banner-otp-timer');
             const cmdInput = document.getElementById('banner-otp-cmd');
             const statusEl = document.getElementById('banner-status-text');
-            const copyBtn = document.getElementById('banner-copy-btn');
 
-            if (!display) return;
-            display.innerText = '......';
-            if (timerEl) { timerEl.innerText = '10:00'; timerEl.style.color = '#f59e0b'; }
-            if (copyBtn) { copyBtn.innerHTML = '<svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg> Copy Command'; }
+            // Invalidate current OTP state immediately to prevent copying stale code
+            bannerOtp = '';
+            bannerOtpExpiresAt = 0;
+            if (display) display.innerText = '······';
+            if (timerEl) { timerEl.innerText = '01:00'; timerEl.style.color = '#38bdf8'; }
+            if (cmdInput) cmdInput.value = 'Generating command...';
+            setCopyBtnState(false, 'Generating...');
 
             try {
-                const res = await fetch('/api/otp/generate', { method: 'POST' });
+                const res = await fetch('/api/otp/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
-                if (data.status === 'success') {
+                if (data.status === 'success' && data.otp) {
                     bannerOtp = data.otp;
-                    display.innerText = bannerOtp;
+                    const duration = Number(data.expires_in) || 60;
+                    bannerOtpExpiresAt = Date.now() + (duration * 1000);
+
+                    if (display) display.innerText = bannerOtp;
                     const origin = window.location.origin;
                     const cmd = `iex (irm '${origin}/api/client/update/setup_client.ps1?otp=${bannerOtp}')`;
                     if (cmdInput) cmdInput.value = cmd;
                     if (statusEl) statusEl.innerHTML = '<span>💡 Run this in PowerShell on any Windows machine to install and pair it automatically.</span>';
 
-                    bannerOtpCountdown = data.expires_in || 600;
-                    bannerOtpTimer = setInterval(updateBannerOtpTimer, 1000);
-                    bannerOtpPoll = setInterval(pollBannerOtpStatus, 3000);
+                    // Enable Copy Command button with valid synced command
+                    setCopyBtnState(true, 'Copy Command');
+
+                    // Synchronize countdown immediately and start interval
+                    updateBannerOtpTimer();
+                    bannerOtpTimer = setInterval(updateBannerOtpTimer, 500);
+                    bannerOtpPoll = setInterval(pollBannerOtpStatus, 2500);
                 } else {
-                    if (statusEl) statusEl.innerText = 'Failed to generate OTP: ' + (data.error || 'Unknown error');
+                    throw new Error(data.error || 'Server rejected OTP generation');
                 }
             } catch (err) {
-                if (statusEl) statusEl.innerText = 'Network error fetching OTP: ' + err.message;
+                console.error('Error refreshing OTP:', err);
+                if (display) display.innerText = 'ERROR';
+                if (cmdInput) cmdInput.value = 'Failed to generate OTP command. Retrying...';
+                if (timerEl) { timerEl.innerText = '--:--'; timerEl.style.color = '#ef4444'; }
+                if (statusEl) statusEl.innerHTML = `<span style="color:#ef4444;">⚠ Network error generating OTP (${err.message}). Retrying in 5s...</span>`;
+                setCopyBtnState(false, 'Unavailable');
+                otpRetryTimeout = setTimeout(() => {
+                    refreshBannerOtp();
+                }, 5000);
+            } finally {
+                isRefreshingOtp = false;
             }
         }
 
         function updateBannerOtpTimer() {
-            bannerOtpCountdown--;
             const timerEl = document.getElementById('banner-otp-timer');
-            if (bannerOtpCountdown <= 0) {
-                if (timerEl) { timerEl.innerText = 'Refreshing...'; timerEl.style.color = '#38bdf8'; }
+            if (!bannerOtpExpiresAt) return;
+
+            const remainingMs = bannerOtpExpiresAt - Date.now();
+            const remainingSecs = Math.max(0, Math.ceil(remainingMs / 1000));
+
+            if (remainingSecs <= 0) {
+                if (timerEl) {
+                    timerEl.innerText = '00:00';
+                    timerEl.style.color = '#ef4444';
+                }
+                // Immediately invalidate so an expired OTP is NEVER copied
+                bannerOtp = '';
+                bannerOtpExpiresAt = 0;
+                setCopyBtnState(false, 'Expired');
+                const cmdInput = document.getElementById('banner-otp-cmd');
+                if (cmdInput) cmdInput.value = 'OTP expired. Refreshing...';
+                if (bannerOtpTimer) { clearInterval(bannerOtpTimer); bannerOtpTimer = null; }
+                if (bannerOtpPoll) { clearInterval(bannerOtpPoll); bannerOtpPoll = null; }
                 refreshBannerOtp();
                 return;
             }
+
             if (timerEl) {
-                const mins = Math.floor(bannerOtpCountdown / 60);
-                const secs = bannerOtpCountdown % 60;
-                timerEl.innerText = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+                timerEl.innerText = formatCountdown(remainingSecs);
+                if (remainingSecs <= 10) {
+                    timerEl.style.color = '#ef4444';
+                } else if (remainingSecs <= 20) {
+                    timerEl.style.color = '#f59e0b';
+                } else {
+                    timerEl.style.color = '#38bdf8';
+                }
             }
         }
 
@@ -2136,6 +2210,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (!bannerOtp) return;
             try {
                 const res = await fetch(`/api/otp/status?otp=${bannerOtp}`);
+                if (!res.ok) return;
                 const data = await res.json();
                 if (data.status === 'consumed') {
                     if (bannerOtpPoll) { clearInterval(bannerOtpPoll); bannerOtpPoll = null; }
@@ -2143,24 +2218,64 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     const statusEl = document.getElementById('banner-status-text');
                     if (statusEl) statusEl.innerHTML = '<b style="color:#10b981;">✓ New client machine paired and connected successfully!</b>';
                     fetchDevices();
-                    setTimeout(refreshBannerOtp, 5000);
+                    setTimeout(refreshBannerOtp, 4000);
                 }
             } catch (e) {}
         }
 
         function copyBannerCmd() {
+            // Strict security check: never copy if OTP is expired or absent
+            if (!bannerOtp || !bannerOtpExpiresAt || Date.now() >= bannerOtpExpiresAt) {
+                setCopyBtnState(false, 'Expired');
+                refreshBannerOtp();
+                return;
+            }
+
             const input = document.getElementById('banner-otp-cmd');
-            if (!input) return;
+            if (!input || !input.value || input.value.indexOf(bannerOtp) === -1) {
+                return;
+            }
+
             input.select();
-            navigator.clipboard.writeText(input.value);
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(input.value).catch(() => {
+                    document.execCommand('copy');
+                });
+            } else {
+                document.execCommand('copy');
+            }
+
             const btn = document.getElementById('banner-copy-btn');
             if (btn) {
-                btn.innerHTML = '✓ Copied!';
+                btn.innerHTML = '<svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> Copied!';
+                btn.style.background = '#10b981';
                 setTimeout(() => {
-                    btn.innerHTML = '<svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg> Copy Command';
+                    if (bannerOtp && Date.now() < bannerOtpExpiresAt) {
+                        setCopyBtnState(true, 'Copy Command');
+                        btn.style.background = 'var(--accent)';
+                    }
                 }, 2000);
             }
         }
+
+        // Auto-refresh when tab becomes visible or receives focus after dormancy
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                if (!bannerOtp || !bannerOtpExpiresAt || Date.now() >= bannerOtpExpiresAt) {
+                    refreshBannerOtp();
+                } else {
+                    updateBannerOtpTimer();
+                }
+            }
+        });
+
+        window.addEventListener('focus', () => {
+            if (!bannerOtp || !bannerOtpExpiresAt || Date.now() >= bannerOtpExpiresAt) {
+                refreshBannerOtp();
+            } else {
+                updateBannerOtpTimer();
+            }
+        });
 
         // ==================== REMOTE POWERSHELL TERMINAL ====================
         let terminalPollInterval = null;
@@ -2198,7 +2313,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const out = document.getElementById('terminal-output');
             const span = document.createElement('span');
             span.style.color = color || '#e6edf3';
-            span.textContent = text + '\n';
+            span.textContent = text + String.fromCharCode(10);
             out.appendChild(span);
             out.scrollTop = out.scrollHeight;
         }
@@ -2263,7 +2378,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     } else {
                         terminalLog('(no output)', '#8b949e');
                     }
-                    terminalLog(`\n✓ Exit code: ${r.exit_code}  |  Completed: ${new Date(r.completed_at).toLocaleTimeString()}`, exitColor);
+                    terminalLog(String.fromCharCode(10) + `✓ Exit code: ${r.exit_code}  |  Completed: ${new Date(r.completed_at).toLocaleTimeString()}`, exitColor);
                     terminalLog('─'.repeat(60), '#30363d');
                     document.getElementById('terminal-send-btn').disabled = false;
                     document.getElementById('terminal-send-btn').innerText = 'Run';
@@ -3168,7 +3283,7 @@ def get_devices():
     if devices_tbl is not None:
         try:
             res = devices_tbl.scan()
-            items = [d for d in res.get("Items", []) if not str(d.get("device_id", "")).startswith("OTP#")]
+            items = [d for d in res.get("Items", []) if not str(d.get("device_id", "")).startswith("OTP#") and d.get("device_id") != "CURRENT_ENROLLMENT_OTP"]
             items.sort(key=lambda d: d.get("nickname", "").lower())
             return jsonify(items)
         except Exception as e:
@@ -3864,21 +3979,47 @@ def verify_client_token(device_id):
 
 @app.route('/api/otp/generate', methods=['POST'])
 def generate_install_otp():
-    """Generates a secure 6-digit OTP for first-time client installation (valid 10 mins)."""
+    """Generates a secure 6-digit OTP for first-time client installation (valid 60 seconds)."""
     if devices_tbl is None:
         return jsonify({"error": "DynamoDB not available"}), 500
     try:
+        now_ts = int(time.time())
+        # Invalidate previously active enrollment OTP to ensure single active code
+        try:
+            prev = devices_tbl.get_item(Key={"device_id": "CURRENT_ENROLLMENT_OTP"})
+            prev_item = prev.get("Item")
+            if prev_item and prev_item.get("active_otp"):
+                prev_otp = prev_item["active_otp"]
+                devices_tbl.update_item(
+                    Key={"device_id": f"OTP#{prev_otp}"},
+                    UpdateExpression="SET #s = :s",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={":s": "superseded"}
+                )
+        except Exception:
+            pass
+
         otp = f"{random.randint(100000, 999999):06d}"
-        ttl = int(time.time()) + 600  # 10 minutes
+        expires_at = now_ts + 60  # Exactly 60 seconds duration
         item = {
             "device_id": f"OTP#{otp}",
             "otp": otp,
             "status": "pending",
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "ttl": ttl
+            "expires_at": expires_at,
+            "ttl": expires_at + 300  # DynamoDB TTL keeps item for automated deletion
         }
         devices_tbl.put_item(Item=item)
-        return jsonify({"status": "success", "otp": otp, "expires_in": 600}), 200
+
+        # Track current active OTP
+        devices_tbl.put_item(Item={
+            "device_id": "CURRENT_ENROLLMENT_OTP",
+            "active_otp": otp,
+            "expires_at": expires_at,
+            "ttl": expires_at + 300
+        })
+
+        return jsonify({"status": "success", "otp": otp, "expires_in": 60}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3892,6 +4033,10 @@ def check_otp_status():
         res = devices_tbl.get_item(Key={"device_id": f"OTP#{otp}"})
         item = res.get("Item")
         if not item:
+            return jsonify({"status": "expired"}), 200
+        now_ts = int(time.time())
+        expires_at = item.get("expires_at", 0)
+        if expires_at and now_ts > expires_at and item.get("status") == "pending":
             return jsonify({"status": "expired"}), 200
         return jsonify({"status": item.get("status", "pending")}), 200
     except Exception as e:
@@ -3913,12 +4058,22 @@ def client_verify_otp():
         otp_key = f"OTP#{otp}"
         res = devices_tbl.get_item(Key={"device_id": otp_key})
         item = res.get("Item")
+        now_ts = int(time.time())
         if not item:
             return jsonify({"status": "error", "error": "Invalid or expired OTP"}), 401
-        if item.get("status") != "pending":
+        if item.get("status") == "consumed":
             return jsonify({"status": "error", "error": "OTP has already been used"}), 401
-        if item.get("ttl", 0) < int(time.time()):
-            return jsonify({"status": "error", "error": "OTP has expired"}), 401
+        if item.get("status") == "superseded":
+            return jsonify({"status": "error", "error": "OTP has expired. Please use the current OTP displayed on the dashboard."}), 401
+        if item.get("status") != "pending":
+            return jsonify({"status": "error", "error": "Invalid OTP status"}), 401
+
+        # Strict 60-second expiration check
+        expires_at = item.get("expires_at", 0)
+        if expires_at and now_ts > expires_at:
+            return jsonify({"status": "error", "error": "OTP has expired. Please use the current OTP displayed on the dashboard."}), 401
+        if not expires_at and item.get("ttl", 0) < now_ts:
+            return jsonify({"status": "error", "error": "OTP has expired. Please use the current OTP displayed on the dashboard."}), 401
 
         # Mark OTP as consumed immediately
         devices_tbl.update_item(
