@@ -2086,7 +2086,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 return;
             }
             try {
-                const res = await fetch(`/api/screenshots/${currentModalFilename}`, {
+                const devId = selectedDevice || '';
+                const cleanPath = currentModalFilename.split('/').map(encodeURIComponent).join('/');
+                const res = await fetch(`/api/screenshots/${cleanPath}?device_id=${encodeURIComponent(devId)}`, {
                     method: 'DELETE'
                 });
                 if (res.ok) {
@@ -3408,12 +3410,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 return;
             }
             try {
-                const res = await fetch(`/api/screenshots/${filename}`, {
+                const devId = selectedDevice || '';
+                const cleanPath = filename.split('/').map(encodeURIComponent).join('/');
+                const res = await fetch(`/api/screenshots/${cleanPath}?device_id=${encodeURIComponent(devId)}`, {
                     method: 'DELETE'
                 });
                 if (res.ok) {
                     selectedScreenshotFilenames.delete(filename);
                     fetchScreenshots();
+                    fetchLogs();
                 } else {
                     alert("Failed to delete screenshot");
                 }
@@ -3435,11 +3440,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const res = await fetch('/api/screenshots/bulk-delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filenames })
+                    body: JSON.stringify({ filenames, device_id: selectedDevice || '' })
                 });
                 if (res.ok) {
                     selectedScreenshotFilenames.clear();
                     fetchScreenshots();
+                    fetchLogs();
                 } else {
                     alert("Failed to delete selected screenshots");
                 }
@@ -4168,58 +4174,145 @@ def get_screenshots():
 def delete_screenshot(filename):
     if '..' in filename:
         return jsonify({"error": "Invalid filename"}), 400
-        
+
+    device_id = request.args.get("device_id")
+
+    # 1. Delete all possible key variants from S3
     s3_deleted = False
     if s3_client is not None and S3_BUCKET:
+        s3_keys_to_delete = {filename}
+        if not filename.startswith("screenshots/"):
+            s3_keys_to_delete.add(f"screenshots/{filename}")
+        else:
+            s3_keys_to_delete.add(filename[len("screenshots/"):])
+
+        for k in s3_keys_to_delete:
+            try:
+                s3_client.delete_object(Bucket=S3_BUCKET, Key=k)
+                s3_deleted = True
+            except Exception as e:
+                print(f"Failed to delete screenshot {k} from S3: {e}")
+
+    # 2. Comprehensive cleanup from DynamoDB mstool_activity_logs
+    if logs_tbl is not None:
         try:
-            s3_client.delete_object(Bucket=S3_BUCKET, Key=filename)
-            s3_deleted = True
-        except Exception as e:
-            print(f"Failed to delete screenshot from S3: {e}")
-            
-    # Try deleting locally
-    local_path = os.path.join("screenshots", filename)
+            target_items = []
+            if device_id:
+                q_res = logs_tbl.query(
+                    KeyConditionExpression="device_id = :did",
+                    ExpressionAttributeValues={":did": device_id}
+                )
+                target_items = q_res.get("Items", [])
+            else:
+                s_res = logs_tbl.scan()
+                target_items = s_res.get("Items", [])
+
+            base_fn = os.path.basename(filename)
+            for it in target_items:
+                sf = it.get("screenshot_filename") or ""
+                if sf == filename or os.path.basename(sf) == base_fn or sf.endswith(base_fn):
+                    did = it["device_id"]
+                    tsid = it["timestamp_id"]
+                    typed = (it.get("typed_text") or "").strip()
+                    # Delete the log record if it's primarily a screenshot entry
+                    if not typed or typed.startswith("[Mouse Click]") or typed.startswith("[Periodic Capture]"):
+                        logs_tbl.delete_item(Key={"device_id": did, "timestamp_id": tsid})
+                    else:
+                        # Clear screenshot references from keystroke entry
+                        logs_tbl.update_item(
+                            Key={"device_id": did, "timestamp_id": tsid},
+                            UpdateExpression="SET screenshot_filename = :empty, screenshot_url = :empty",
+                            ExpressionAttributeValues={":empty": ""}
+                        )
+        except Exception as de:
+            print(f"Failed to clean screenshot from DynamoDB: {de}")
+
+    # 3. Try deleting locally
     local_deleted = False
-    if os.path.exists(local_path):
-        try:
-            os.remove(local_path)
-            local_deleted = True
-        except Exception:
-            pass
-            
-    if s3_deleted or local_deleted:
-        return jsonify({"status": "success"}), 200
-        
-    return jsonify({"error": "File not found or deletion failed"}), 404
+    for local_path in [os.path.join("screenshots", filename), filename]:
+        if os.path.exists(local_path) and os.path.isfile(local_path):
+            try:
+                os.remove(local_path)
+                local_deleted = True
+            except Exception:
+                pass
+
+    return jsonify({"status": "success"}), 200
 
 @app.route('/api/screenshots/bulk-delete', methods=['POST'])
 def bulk_delete_screenshots():
     try:
         data = request.json or {}
         filenames = data.get("filenames", [])
-        
-        # 1. Delete from S3
-        if s3_client is not None and S3_BUCKET and filenames:
+        device_id = data.get("device_id")
+        if not filenames:
+            return jsonify({"status": "success", "deleted": 0}), 200
+
+        # Build comprehensive S3 keys set
+        s3_keys_set = set()
+        base_names_set = set()
+        for fn in filenames:
+            fn_clean = str(fn).strip()
+            s3_keys_set.add(fn_clean)
+            if not fn_clean.startswith("screenshots/"):
+                s3_keys_set.add(f"screenshots/{fn_clean}")
+            else:
+                s3_keys_set.add(fn_clean[len("screenshots/"):])
+            base_names_set.add(os.path.basename(fn_clean))
+
+        # 1. Delete all matching objects from S3
+        if s3_client is not None and S3_BUCKET and s3_keys_set:
             try:
-                for i in range(0, len(filenames), 1000):
-                    batch = filenames[i:i+1000]
+                s3_list = list(s3_keys_set)
+                for i in range(0, len(s3_list), 1000):
+                    batch = s3_list[i:i+1000]
                     s3_client.delete_objects(
                         Bucket=S3_BUCKET,
                         Delete={"Objects": [{"Key": k} for k in batch]}
                     )
             except Exception as e:
                 print(f"Failed to bulk delete screenshots from S3: {e}")
-                
-        # 2. Delete local files
-        for filename in filenames:
-            if '..' in filename:
-                continue
-            path = os.path.join("screenshots", filename)
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
+
+        # 2. Delete / Clean up records from DynamoDB mstool_activity_logs
+        if logs_tbl is not None:
+            try:
+                target_items = []
+                if device_id:
+                    q_res = logs_tbl.query(
+                        KeyConditionExpression="device_id = :did",
+                        ExpressionAttributeValues={":did": device_id}
+                    )
+                    target_items = q_res.get("Items", [])
+                else:
+                    s_res = logs_tbl.scan()
+                    target_items = s_res.get("Items", [])
+
+                for it in target_items:
+                    sf = it.get("screenshot_filename") or ""
+                    if sf in s3_keys_set or os.path.basename(sf) in base_names_set or any(sf.endswith(b) for b in base_names_set):
+                        did = it["device_id"]
+                        tsid = it["timestamp_id"]
+                        typed = (it.get("typed_text") or "").strip()
+                        if not typed or typed.startswith("[Mouse Click]") or typed.startswith("[Periodic Capture]"):
+                            logs_tbl.delete_item(Key={"device_id": did, "timestamp_id": tsid})
+                        else:
+                            logs_tbl.update_item(
+                                Key={"device_id": did, "timestamp_id": tsid},
+                                UpdateExpression="SET screenshot_filename = :empty, screenshot_url = :empty",
+                                ExpressionAttributeValues={":empty": ""}
+                            )
+            except Exception as de:
+                print(f"Failed to clean DynamoDB screenshot logs: {de}")
+
+        # 3. Delete local files
+        for fn in filenames:
+            for p in [os.path.join("screenshots", fn), fn]:
+                if os.path.exists(p) and os.path.isfile(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+
         return jsonify({"status": "success", "deleted": len(filenames)}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
