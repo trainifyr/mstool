@@ -51,6 +51,11 @@ except Exception:
 load_dotenv(".EVN")
 load_dotenv()
 
+# Version and Build tracking (auto-injected on deploy)
+APP_BUILD_VERSION = os.getenv("APP_BUILD_VERSION", "v1.66.9029b7a")
+APP_BUILD_TIME = os.getenv("APP_BUILD_TIME", "2026-11-12 15:50:00 UTC")
+APP_GIT_COMMIT = os.getenv("APP_GIT_COMMIT", "9029b7a")
+
 # AWS Configuration (100% Native AWS: DynamoDB + S3)
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 S3_BUCKET = os.getenv("S3_BUCKET", "mstool-screenshots-687159379620-ap-south-1")
@@ -1548,7 +1553,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id="landing-page" class="container view-screen">
         <header style="margin-bottom: 2rem;">
             <div>
-                <h1>MY HOME MY RULE</h1>
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                    <h1>MY HOME MY RULE</h1>
+                    <span id="app-version-badge-landing" style="background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.4); color: #818cf8; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; padding: 2px 8px; border-radius: 9999px; font-weight: 600;" title="Build Time: {{ app_build_time | default('Latest') }}">
+                        {{ app_version | default('v1.0.0') }}
+                    </span>
+                </div>
                 <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.25rem;">Live Keystroke & Activity Monitor - Monitored Devices Overview</p>
             </div>
             <div style="display: flex; align-items: center; gap: 0.75rem;">
@@ -1637,7 +1647,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     Back
                 </button>
                 <div>
-                    <h1 id="detail-device-title" style="font-size: 1.5rem;">Device Details</h1>
+                    <div style="display: flex; align-items: center; gap: 0.6rem;">
+                        <h1 id="detail-device-title" style="font-size: 1.5rem;">Device Details</h1>
+                        <span id="app-version-badge-detail" style="background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.4); color: #818cf8; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; padding: 2px 8px; border-radius: 9999px; font-weight: 600;" title="Build Time: {{ app_build_time | default('Latest') }}">
+                            {{ app_version | default('v1.0.0') }}
+                        </span>
+                    </div>
                     <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 0.1rem;" id="detail-device-subtitle">Keystroke logs & screenshots</p>
                 </div>
             </div>
@@ -3905,7 +3920,28 @@ def logout_view():
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    rendered = render_template_string(
+        HTML_TEMPLATE,
+        app_version=APP_BUILD_VERSION,
+        app_build_time=APP_BUILD_TIME,
+        app_commit=APP_GIT_COMMIT
+    )
+    resp = make_response(rendered)
+    # Anti-caching headers so browsers ALWAYS fetch latest code & UI
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    resp.headers['X-App-Version'] = APP_BUILD_VERSION
+    return resp
+
+@app.route('/api/version', methods=['GET'])
+def get_version():
+    """Returns current server version info for client & UI sync checks."""
+    return jsonify({
+        "version": APP_BUILD_VERSION,
+        "build_time": APP_BUILD_TIME,
+        "commit": APP_GIT_COMMIT
+    })
 
 @app.route('/screenshots/<path:filename>')
 def serve_screenshot(filename):

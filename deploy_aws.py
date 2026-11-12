@@ -42,7 +42,20 @@ def deploy():
     dist_dir = os.path.abspath("lambda_dist")
     zip_path = os.path.abspath("deployment.zip")
 
-    # 2. Prepare build directory
+    # 2. Get git commit & build info for automatic UI cache-busting & version badge
+    try:
+        git_commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    except Exception:
+        git_commit = "latest"
+    try:
+        git_count = subprocess.check_output(["git", "rev-list", "--count", "HEAD"], text=True).strip()
+    except Exception:
+        git_count = "1"
+    build_version = f"v1.{git_count}.{git_commit}"
+    build_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    print(f"      Build Version: {build_version} ({build_time})")
+
+    # 3. Prepare build directory
     os.makedirs(dist_dir, exist_ok=True)
 
     # Check if packages are already installed in lambda_dist
@@ -153,7 +166,10 @@ handler = make_lambda_handler(app)
         "LOGS_TABLE": logs_table,
         "DASHBOARD_USER": dashboard_user,
         "DASHBOARD_PASS": dashboard_pass,
-        "SCREENSHOT_ENCRYPTION_KEY": enc_key
+        "SCREENSHOT_ENCRYPTION_KEY": enc_key,
+        "APP_BUILD_VERSION": build_version,
+        "APP_BUILD_TIME": build_time,
+        "APP_GIT_COMMIT": git_commit
     }
 
     try:
