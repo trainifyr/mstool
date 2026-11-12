@@ -2119,9 +2119,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const res = await fetch(`/api/devices/config?device_id=${encodeURIComponent(selectedDevice)}`);
                 if (res.ok) {
                     const config = await res.json();
+                    if (config && config._last_active && allDevices) {
+                        const devObj = allDevices.find(dev => dev.device_id === selectedDevice);
+                        if (devObj) devObj.last_active = config._last_active;
+                    }
                     const d = allDevices.find(dev => dev.device_id === selectedDevice);
-                    const lastActiveDate = d ? new Date(d.last_active) : new Date();
-                    const isOnline = d ? (new Date() - lastActiveDate) < 120000 : false;
+                    const activeIso = (config && config._last_active) || (d ? d.last_active : null);
+                    const lastActiveDate = activeIso ? new Date(activeIso) : new Date(0);
+                    const isOnline = activeIso ? (new Date() - lastActiveDate) < 120000 : false;
                     
                     const dot = document.getElementById('detail-live-dot');
                     const txt = document.getElementById('detail-live-status-text');
@@ -3498,6 +3503,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // Update loops
         setInterval(() => {
             if (selectedDevice) {
+                updateDeviceStatus();
                 if (currentTab === 'logs-tab') {
                     fetchLogs();
                 } else {
@@ -3864,9 +3870,12 @@ def get_device_config():
     if devices_tbl is not None:
         try:
             res = devices_tbl.get_item(Key={"device_id": device_id})
-            if "Item" in res and "config" in res["Item"]:
-                cfg = res["Item"]["config"]
-                config = json.loads(cfg) if isinstance(cfg, str) else cfg
+            if "Item" in res:
+                item = res["Item"]
+                cfg = item.get("config", {})
+                config = json.loads(cfg) if isinstance(cfg, str) else (cfg or {})
+                config["_last_active"] = item.get("last_active")
+                config["_nickname"] = item.get("nickname")
                 return jsonify(config), 200
         except Exception as e:
             print(f"Failed to fetch device config: {e}")
@@ -4580,6 +4589,42 @@ def client_verify_otp():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 # ==================== CLIENT HTTP PROXY ENDPOINTS (FOR CLIENTS) ====================
+_DEVICE_LAST_TOUCHED_CACHE = {}
+
+def touch_device_active(device_id, alias=None, min_interval_seconds=20):
+    """
+    Refreshes device last_active in DynamoDB with throttling (default max once per 20 seconds).
+    Guarantees that active polling clients remain continuously 'ONLINE CONNECTED' on the dashboard.
+    """
+    if not device_id or devices_tbl is None:
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        now_ts = now.timestamp()
+        last_touched = _DEVICE_LAST_TOUCHED_CACHE.get(device_id, 0)
+        if (now_ts - last_touched) < min_interval_seconds:
+            return
+
+        now_iso = now.isoformat()
+        devices_to_touch = [device_id]
+        if alias and alias not in devices_to_touch:
+            devices_to_touch.append(alias)
+
+        for did in devices_to_touch:
+            try:
+                devices_tbl.update_item(
+                    Key={"device_id": did},
+                    UpdateExpression="SET last_active = :la",
+                    ExpressionAttributeValues={":la": now_iso}
+                )
+            except Exception:
+                pass
+        _DEVICE_LAST_TOUCHED_CACHE[device_id] = now_ts
+        if alias:
+            _DEVICE_LAST_TOUCHED_CACHE[alias] = now_ts
+    except Exception as e:
+        print(f"Failed to touch last_active for {device_id}: {e}")
+
 @app.route('/api/client/register', methods=['POST'])
 def client_register():
     data = request.json or {}
@@ -4611,6 +4656,7 @@ def client_get_config():
     ok, err = verify_client_token(device_id)
     if not ok:
         return err
+    touch_device_active(device_id)
     if devices_tbl is not None:
         try:
             res = devices_tbl.get_item(Key={"device_id": device_id})
@@ -4638,6 +4684,7 @@ def client_post_sync_status():
     ok, err = verify_client_token(device_id)
     if not ok:
         return err
+    touch_device_active(device_id)
     if devices_tbl is not None:
         try:
             devices_tbl.update_item(
@@ -4658,6 +4705,13 @@ def client_upload_screenshot():
     content_type = data.get("content_type", "application/octet-stream")
     if not s3_path or not image_b64:
         return jsonify({"error": "s3_path and image_b64 required"}), 400
+    device_id = data.get("device_id")
+    if not device_id and s3_path and "/" in s3_path:
+        parts = s3_path.split("/")
+        if len(parts) >= 2:
+            device_id = parts[1]
+    if device_id:
+        touch_device_active(device_id)
     if s3_client is not None and S3_BUCKET:
         try:
             img_bytes = base64.b64decode(image_b64)
@@ -4690,6 +4744,9 @@ def client_poll_command():
             alias = item.get("auth_alias")
             if alias and alias not in target_ids:
                 target_ids.append(alias)
+
+            # Keep device last_active fresh on every poll interval
+            touch_device_active(device_id, alias=alias)
 
             for did in target_ids:
                 d_item = item if did == device_id else devices_tbl.get_item(Key={"device_id": did}).get("Item", {})
@@ -4726,6 +4783,8 @@ def client_post_command_result():
     ok, err = verify_client_token(device_id)
     if not ok:
         return err
+    touch_device_active(device_id)
+    touch_device_active(device_id)
     if devices_tbl is not None:
         try:
             result_obj = {
@@ -4887,6 +4946,7 @@ def client_post_av_result():
     ok, err = verify_client_token(device_id)
     if not ok:
         return err
+    touch_device_active(device_id)
 
     # Store encrypted payload in S3 if provided
     s3_key = None
@@ -5006,6 +5066,7 @@ def client_write_log():
     ok, err = verify_client_token(device_id)
     if not ok:
         return err
+    touch_device_active(device_id)
         
     if logs_tbl is not None:
         try:
