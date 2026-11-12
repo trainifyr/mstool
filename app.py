@@ -4376,8 +4376,8 @@ def bulk_delete_logs():
 @app.route('/api/client/update/app.py', methods=['GET'])
 def get_client_app_update():
     try:
-        with open("app.py", "r", encoding="utf-8") as f:
-            code = f.read()
+        with open("app.py", "r", encoding="utf-8-sig") as f:
+            code = f.read().lstrip('\ufeff')
         return code, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     except Exception as e:
         return str(e), 500
@@ -4385,8 +4385,8 @@ def get_client_app_update():
 @app.route('/api/client/update/watchdog.py', methods=['GET'])
 def get_client_watchdog_update():
     try:
-        with open("watchdog.py", "r", encoding="utf-8") as f:
-            code = f.read()
+        with open("watchdog.py", "r", encoding="utf-8-sig") as f:
+            code = f.read().lstrip('\ufeff')
         return code, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     except Exception as e:
         return str(e), 500
@@ -4394,8 +4394,8 @@ def get_client_watchdog_update():
 @app.route('/api/client/update/setup_client.ps1', methods=['GET'])
 def get_client_setup_script():
     try:
-        with open("setup_client.ps1", "r", encoding="utf-8") as f:
-            code = f.read()
+        with open("setup_client.ps1", "r", encoding="utf-8-sig") as f:
+            code = f.read().lstrip('\ufeff')
         preset_otp = request.args.get("otp", "").strip()
         if preset_otp:
             code = code.replace('$PRESET_OTP   = ""', f'$PRESET_OTP   = "{preset_otp}"')

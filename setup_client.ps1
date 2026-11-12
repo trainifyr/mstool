@@ -1,4 +1,4 @@
-﻿# MSTool Client Auto-Setup Script - Secure OTP
+# MSTool Client Auto-Setup Script - Secure OTP
 # Central AWS Lambda Server: https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
