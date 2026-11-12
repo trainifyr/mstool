@@ -4052,24 +4052,44 @@ def view_decrypted_screenshot(filename):
 
 @app.route('/api/devices')
 def get_devices():
+    items = []
     if devices_tbl is not None:
         try:
-            res = devices_tbl.scan()
+            # Fully paginate DynamoDB scan so no devices are dropped if items accumulate
+            done = False
+            start_key = None
+            raw_items = []
+            while not done:
+                scan_kwargs = {}
+                if start_key:
+                    scan_kwargs["ExclusiveStartKey"] = start_key
+                res = devices_tbl.scan(**scan_kwargs)
+                raw_items.extend(res.get("Items", []))
+                start_key = res.get("LastEvaluatedKey")
+                if not start_key:
+                    done = True
+
             items = [
-                d for d in res.get("Items", [])
+                d for d in raw_items
                 if not str(d.get("device_id", "")).startswith("OTP#")
                 and d.get("device_id") != "CURRENT_ENROLLMENT_OTP"
                 and not str(d.get("device_id", "")).endswith(('.dat', '.webp', '.png', '.jpg', '.jpeg'))
             ]
             items.sort(key=lambda d: d.get("nickname", "").lower())
-            return jsonify(items)
         except Exception as e:
             print(f"Failed to query devices from DynamoDB: {e}")
-            
-    # Fallback/local mode
-    device_id = get_device_id()
-    hostname = socket.gethostname() or "Unknown Device"
-    return jsonify([{"device_id": device_id, "nickname": hostname}])
+            items = []
+
+    if not items and devices_tbl is None:
+        device_id = get_device_id()
+        hostname = socket.gethostname() or "Unknown Device"
+        items = [{"device_id": device_id, "nickname": hostname}]
+
+    resp = make_response(jsonify(items))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 @app.route('/api/devices/rename', methods=['POST'])
 def rename_device():
@@ -4873,18 +4893,13 @@ def generate_install_otp():
         return jsonify({"error": "DynamoDB not available"}), 500
     try:
         now_ts = int(time.time())
-        # Invalidate previously active enrollment OTP to ensure single active code
+        # Delete previous OTP record to prevent table pollution
         try:
             prev = devices_tbl.get_item(Key={"device_id": "CURRENT_ENROLLMENT_OTP"})
             prev_item = prev.get("Item")
             if prev_item and prev_item.get("active_otp"):
                 prev_otp = prev_item["active_otp"]
-                devices_tbl.update_item(
-                    Key={"device_id": f"OTP#{prev_otp}"},
-                    UpdateExpression="SET #s = :s",
-                    ExpressionAttributeNames={"#s": "status"},
-                    ExpressionAttributeValues={":s": "superseded"}
-                )
+                devices_tbl.delete_item(Key={"device_id": f"OTP#{prev_otp}"})
         except Exception:
             pass
 
