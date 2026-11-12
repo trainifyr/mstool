@@ -3735,7 +3735,12 @@ def get_devices():
     if devices_tbl is not None:
         try:
             res = devices_tbl.scan()
-            items = [d for d in res.get("Items", []) if not str(d.get("device_id", "")).startswith("OTP#") and d.get("device_id") != "CURRENT_ENROLLMENT_OTP"]
+            items = [
+                d for d in res.get("Items", [])
+                if not str(d.get("device_id", "")).startswith("OTP#")
+                and d.get("device_id") != "CURRENT_ENROLLMENT_OTP"
+                and not str(d.get("device_id", "")).endswith(('.dat', '.webp', '.png', '.jpg', '.jpeg'))
+            ]
             items.sort(key=lambda d: d.get("nickname", "").lower())
             return jsonify(items)
         except Exception as e:
@@ -4596,7 +4601,9 @@ def touch_device_active(device_id, alias=None, min_interval_seconds=20):
     Refreshes device last_active in DynamoDB with throttling (default max once per 20 seconds).
     Guarantees that active polling clients remain continuously 'ONLINE CONNECTED' on the dashboard.
     """
-    if not device_id or devices_tbl is None:
+    if not device_id or not isinstance(device_id, str) or devices_tbl is None:
+        return
+    if device_id.endswith(('.dat', '.webp', '.png', '.jpg', '.jpeg', '.vbs', '.ps1', '.py')):
         return
     try:
         now = datetime.now(timezone.utc)
@@ -5212,6 +5219,7 @@ def capture_and_upload_screenshot(prefix):
             with open(local_path, "rb") as sf:
                 enc_bytes = sf.read()
             payload = {
+                "device_id": get_device_id(),
                 "s3_path": s3_path,
                 "image_b64": base64.b64encode(enc_bytes).decode('ascii'),
                 "content_type": "application/octet-stream"
