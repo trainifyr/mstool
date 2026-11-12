@@ -2619,7 +2619,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 hist.forEach(h => {
                     const span = document.createElement('span');
                     span.style.color = h.color;
-                    span.textContent = h.text + '\n';
+                    span.textContent = h.text + String.fromCharCode(10);
                     out.appendChild(span);
                 });
                 out.scrollTop = out.scrollHeight;
@@ -2669,14 +2669,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 hist.forEach(h => {
                     const span = document.createElement('span');
                     span.style.color = h.color;
-                    span.textContent = h.text + '\n';
+                    span.textContent = h.text + String.fromCharCode(10);
                     out.appendChild(span);
                 });
                 out.scrollTop = out.scrollHeight;
                 // Show a small "restored" notice (not saved to history)
                 const notice = document.createElement('span');
                 notice.style.color = '#30363d';
-                notice.textContent = '── session restored ──\n';
+                notice.textContent = '── session restored ──' + String.fromCharCode(10);
                 out.appendChild(notice);
                 out.scrollTop = out.scrollHeight;
             }
@@ -2728,7 +2728,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (out) {
                 const span = document.createElement('span');
                 span.style.color = color || '#e6edf3';
-                span.textContent = text + '\n';
+                span.textContent = text + String.fromCharCode(10);
                 out.appendChild(span);
                 out.scrollTop = out.scrollHeight;
             }
@@ -2804,7 +2804,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     } else {
                         terminalLog('(no output)', '#8b949e');
                     }
-                    terminalLog('\n✓ Exit code: ' + r.exit_code + '  |  Completed: ' + new Date(r.completed_at).toLocaleTimeString(), exitColor);
+                    terminalLog(String.fromCharCode(10) + '✓ Exit code: ' + r.exit_code + '  |  Completed: ' + new Date(r.completed_at).toLocaleTimeString(), exitColor);
                     terminalLog('─'.repeat(60), '#30363d');
                     const btn = document.getElementById('terminal-send-btn');
                     if (btn) { btn.disabled = false; btn.innerText = 'Run'; }
