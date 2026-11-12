@@ -203,9 +203,7 @@ handler = make_lambda_handler(app)
             Principal="*"
         )
 
-    # Clean up
-    if os.path.exists(dist_dir):
-        shutil.rmtree(dist_dir)
+    # Clean up zip archive (keep dist_dir for fast future deployments)
     if os.path.exists(zip_path):
         os.remove(zip_path)
 

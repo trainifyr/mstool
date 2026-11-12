@@ -1,26 +1,5 @@
-﻿<#
-.SYNOPSIS
-    MSTool Client Auto-Setup Script (OTP Authenticated)
-    Installs and configures the monitoring agent on a Windows client machine.
-
-.DESCRIPTION
-    One-command secure setup. Run in PowerShell.
-
-    Usage:
-        iex (irm 'https://<LAMBDA_URL>/api/client/update/setup_client.ps1?otp=123456')
-    Or interactive:
-        iex (irm 'https://<LAMBDA_URL>/api/client/update/setup_client.ps1')
-
-.NOTES
-    - Authenticated with a dynamic one-time setup OTP generated from Dashboard
-    - Upon verification, issues a permanent device authentication token
-    - Downloads app.py + watchdog.py from the central Lambda server
-    - Installs Python if not found
-    - Installs pip dependencies (flask, pynput, pillow, boto3, mss)
-    - Creates .env with RENDER_SERVER_URL and DEVICE_TOKEN
-    - Registers watchdog as a silent startup item
-    - Zero AWS credentials stored on client - all traffic via HTTPS to Lambda
-#>
+﻿# MSTool Client Auto-Setup Script (Secure OTP)
+# Central AWS Lambda Server: https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
 $LAMBDA_URL   = "https://lnslbk3kmal2h2cdlfrvzpwgmu0qzetl.lambda-url.ap-south-1.on.aws"
