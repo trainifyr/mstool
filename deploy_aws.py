@@ -47,8 +47,8 @@ def deploy():
         shutil.rmtree(dist_dir)
     os.makedirs(dist_dir, exist_ok=True)
 
-    print("[1/5] Downloading Linux dependencies (Flask, python-dotenv, apig-wsgi)...")
-    pkgs = ["Flask", "python-dotenv", "apig-wsgi"]
+    print("[1/5] Downloading Linux dependencies (Flask, python-dotenv, apig-wsgi, cryptography)...")
+    pkgs = ["Flask", "python-dotenv", "apig-wsgi", "cryptography"]
     cmd = [
         sys.executable, "-m", "pip", "install",
         "--platform", "manylinux2014_x86_64",
@@ -141,6 +141,7 @@ handler = make_lambda_handler(app)
 
     dashboard_user = os.getenv("DASHBOARD_USER", "admin")
     dashboard_pass = os.getenv("DASHBOARD_PASS", "admin123")
+    enc_key = config.get("SCREENSHOT_ENCRYPTION_KEY") or os.getenv("SCREENSHOT_ENCRYPTION_KEY", "b491396ed90ba50f100bff505f9f3c611aa918383fe0e35b02123694b4be2ace")
 
     env_vars = {
         "SERVER_ONLY": "true",
@@ -148,7 +149,8 @@ handler = make_lambda_handler(app)
         "DEVICES_TABLE": devices_table,
         "LOGS_TABLE": logs_table,
         "DASHBOARD_USER": dashboard_user,
-        "DASHBOARD_PASS": dashboard_pass
+        "DASHBOARD_PASS": dashboard_pass,
+        "SCREENSHOT_ENCRYPTION_KEY": enc_key
     }
 
     try:

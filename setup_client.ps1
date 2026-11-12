@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     MSTool Client Auto-Setup Script (OTP Authenticated)
@@ -84,6 +84,7 @@ try {
         exit 1
     }
     $deviceToken = $verifyRes.device_token
+    $encryptionKey = $verifyRes.encryption_key
     Write-Ok "OTP Verified! Device authorized successfully."
 } catch {
     Write-Err "Authentication failed! The OTP is invalid, expired, or already used."
@@ -176,15 +177,18 @@ RENDER_SERVER_URL=$LAMBDA_URL
 # Device Authentication Token (verified via OTP)
 DEVICE_TOKEN=$deviceToken
 
+# Screenshot Authenticated Encryption Key (AES-256-GCM)
+SCREENSHOT_ENCRYPTION_KEY=$encryptionKey
+
 # How often to poll for config & remote commands (seconds)
 CONFIG_POLL_INTERVAL=30
 "@
 Set-Content -Path "$INSTALL_DIR\.env" -Value $envContent -Encoding UTF8
-Write-Ok ".env written with secure DEVICE_TOKEN"
+Write-Ok ".env written with secure DEVICE_TOKEN and SCREENSHOT_ENCRYPTION_KEY"
 
 # ── STEP 5: Install pip dependencies ──────────────────────────────────────────
 Write-Step 5 "Installing Python dependencies..."
-$deps = @("flask", "pynput", "pillow", "boto3", "python-dotenv", "mss")
+$deps = @("flask", "pynput", "pillow", "boto3", "python-dotenv", "mss", "cryptography")
 try {
     & $python -m pip install --quiet --upgrade pip
     & $python -m pip install --quiet @deps
