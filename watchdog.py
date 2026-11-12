@@ -255,11 +255,12 @@ def monitor_loop():
     
     while True:
         try:
-            # Periodically check for updates (every 24 hours / 86400 seconds)
+            # Periodically check for updates (every 5 minutes / 300 seconds)
             now_time = time.time()
-            if now_time - last_update_check_time >= 86400:
+            if now_time - last_update_check_time >= 300:
                 last_update_check_time = now_time
-                check_for_updates()
+                if check_for_updates():
+                    start_app()
                 
             if is_healthy():
                 consecutive_failures = 0
