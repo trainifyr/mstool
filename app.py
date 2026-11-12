@@ -1824,23 +1824,42 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <button onclick="closeTerminalModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:1.25rem;">&times;</button>
             </div>
             <div id="terminal-output" style="font-family:'Cascadia Code','Consolas',monospace; font-size:0.82rem; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.75rem 1rem; min-height:280px; max-height:380px; overflow-y:auto; color:#e6edf3; white-space:pre-wrap; line-height:1.6;">
-                <span style="color:#8b949e;">&#x25BA; Remote PowerShell terminal ready. Commands run on the target device.\n&#x26A1; Real-time execution: client polling active every 2s for fast responses.\n</span>
+                <span style="color:#8b949e;">&#x25BA; Remote PowerShell terminal ready. Commands run on the target device.\n&#x26A1; Real-time execution: client polling active every 0.8s for fast responses.\n</span>
             </div>
             <div style="display:flex; gap:0.5rem; align-items:center; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.5rem 0.75rem;">
                 <span style="color:#3fb950; font-family:monospace; font-size:0.9rem; white-space:nowrap;">PS &gt;</span>
-                <input type="text" id="terminal-input" placeholder="Enter PowerShell command..." onkeydown="if(event.key==='Enter') sendTerminalCommand()"
+                <input type="text" id="terminal-input" placeholder="Enter PowerShell command (e.g. whoami, hostname, Get-Date)..." onkeydown="if(event.key==='Enter') sendTerminalCommand()"
                     style="flex:1; background:none; border:none; outline:none; color:#e6edf3; font-family:'Cascadia Code','Consolas',monospace; font-size:0.85rem;">
+                <button onclick="toggleTerminalHelp()" title="Show basic test commands & help"
+                    style="background:#1f2937; border:1px solid #30363d; color:#8b949e; padding:0.3rem 0.65rem; border-radius:5px; font-size:0.78rem; font-weight:600; cursor:pointer; white-space:nowrap;">? Help</button>
                 <button onclick="sendTerminalCommand()" id="terminal-send-btn"
                     style="background:#238636; border:none; color:#fff; padding:0.3rem 0.9rem; border-radius:5px; font-size:0.8rem; font-weight:600; cursor:pointer; white-space:nowrap;">Run</button>
             </div>
-            <div style="font-size:0.75rem; color:#6e7681; display:flex; gap:1rem; flex-wrap:wrap;">
-                <span>&#128161; <b style="color:#8b949e;">Quick:</b></span>
+            <div style="font-size:0.75rem; color:#6e7681; display:flex; gap:0.85rem; flex-wrap:wrap; align-items:center;">
+                <span>&#128161; <b style="color:#8b949e;">Basic:</b></span>
+                <span onclick="setTerminalCmd('Write-Output \"PONG \" + (Get-Date -Format \"HH:mm:ss\")')" title="Quick connectivity & latency check" style="cursor:pointer; color:#3fb950; text-decoration:underline;">Ping</span>
+                <span onclick="setTerminalCmd('whoami')" title="Show current Windows username" style="cursor:pointer; color:#3fb950; text-decoration:underline;">Whoami</span>
+                <span onclick="setTerminalCmd('hostname')" title="Show computer hostname" style="cursor:pointer; color:#3fb950; text-decoration:underline;">Hostname</span>
+                <span onclick="setTerminalCmd('((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime) | Select-Object Days,Hours,Minutes | Format-Table')" title="Show how long PC has been on" style="cursor:pointer; color:#3fb950; text-decoration:underline;">Uptime</span>
+                <span style="color:#30363d;">|</span>
                 <span onclick="setTerminalCmd('Get-Process | Sort-Object CPU -Desc | Select-Object -First 15 | Format-Table Name,CPU,WorkingSet -Auto')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Top Processes</span>
                 <span onclick="setTerminalCmd('Get-WmiObject Win32_LogicalDisk | Select-Object DeviceID,@{n=\'Free(GB)\';e={[math]::Round($_.FreeSpace/1GB,1)}},@{n=\'Size(GB)\';e={[math]::Round($_.Size/1GB,1)}} | Format-Table')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Disk Space</span>
-                <span onclick="setTerminalCmd('Get-NetIPAddress | Select-Object InterfaceAlias,IPAddress,AddressFamily | Format-Table')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Network IPs</span>
-                <span onclick="setTerminalCmd('Get-EventLog -LogName System -Newest 20 -EntryType Error | Format-Table TimeGenerated,Source,Message -Wrap')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">System Errors</span>
+                <span onclick="setTerminalCmd('Get-NetIPAddress -AddressFamily IPv4 | Select-Object InterfaceAlias,IPAddress | Format-Table')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Network IPs</span>
+                <span onclick="setTerminalCmd('Get-EventLog -LogName System -Newest 15 -EntryType Error | Format-Table TimeGenerated,Source,Message -Wrap')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">System Errors</span>
                 <span onclick="setTerminalCmd('systeminfo | Select-String \"OS Name|System Boot|Total Physical\"')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">System Info</span>
                 <span onclick="setTerminalCmd('Get-ScheduledTask | Where-Object {$_.State -eq \"Running\"} | Select-Object TaskName,TaskPath | Format-Table')" style="cursor:pointer; color:#58a6ff; text-decoration:underline;">Running Tasks</span>
+            </div>
+            <div id="terminal-help-panel" style="display:none; background:#161b22; border:1px solid #30363d; border-radius:6px; padding:0.75rem 1rem; font-size:0.78rem; color:#c9d1d9; line-height:1.55;">
+                <div style="font-weight:700; color:#58a6ff; margin-bottom:0.4rem;">Basic PowerShell Test Commands &amp; Help</div>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:0.4rem 1rem;">
+                    <div><code style="color:#3fb950;">whoami</code> &mdash; Current Windows user &amp; domain</div>
+                    <div><code style="color:#3fb950;">hostname</code> &mdash; Target PC computer name</div>
+                    <div><code style="color:#3fb950;">Get-Date</code> &mdash; Current date &amp; time on target PC</div>
+                    <div><code style="color:#3fb950;">Get-Location</code> &mdash; Current working folder path</div>
+                    <div><code style="color:#3fb950;">Get-ChildItem $env:USERPROFILE\\Desktop</code> &mdash; List Desktop files</div>
+                    <div><code style="color:#3fb950;">Get-Service | Where-Object Status -eq 'Running' | Select -First 10</code> &mdash; Active Windows services</div>
+                </div>
+                <div style="margin-top:0.5rem; color:#8b949e; font-size:0.74rem;">Tip: Click any green/blue quick link above to auto-fill it, then press <b>Enter</b> or click <b>Run</b>. Commands run silently in the background and return output capped at 8KB.</div>
             </div>
         </div>
     </div>
@@ -2588,6 +2607,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         function setTerminalCmd(cmd) {
             document.getElementById('terminal-input').value = cmd;
             document.getElementById('terminal-input').focus();
+        }
+
+        function toggleTerminalHelp() {
+            const panel = document.getElementById('terminal-help-panel');
+            if (!panel) return;
+            panel.style.display = (panel.style.display === 'none' || !panel.style.display) ? 'block' : 'none';
         }
 
         function terminalLog(text, color) {
