@@ -3788,8 +3788,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 changeDatePreset(datePreset);
             }
             
-            initBannerOtp();
-            await fetchDevices();
+            try {
+                await fetchDevices();
+            } catch (e) {
+                console.error("fetchDevices in init failed:", e);
+            }
+
+            try {
+                initBannerOtp();
+            } catch (e) {
+                console.error("initBannerOtp in init failed:", e);
+            }
             
             // Restore navigation view state
             if (selectedDevice && allDevices.some(d => d.device_id === selectedDevice)) {
