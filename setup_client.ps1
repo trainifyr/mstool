@@ -1,5 +1,4 @@
-﻿#Requires -Version 5.1
-<#
+﻿<#
 .SYNOPSIS
     MSTool Client Auto-Setup Script (OTP Authenticated)
     Installs and configures the monitoring agent on a Windows client machine.
