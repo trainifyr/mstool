@@ -174,17 +174,20 @@ $envContent = @"
 # Central AWS Lambda server URL (no credentials needed - all via HTTPS)
 RENDER_SERVER_URL=$LAMBDA_URL
 
+# Device Hardware ID
+DEVICE_ID=$uuid
+
 # Device Authentication Token (verified via OTP)
 DEVICE_TOKEN=$deviceToken
 
 # Screenshot Authenticated Encryption Key (AES-256-GCM)
 SCREENSHOT_ENCRYPTION_KEY=$encryptionKey
 
-# How often to poll for config & remote commands (seconds)
-CONFIG_POLL_INTERVAL=30
+# How often to poll for config & remote commands (seconds) - Ultra-fast 2s polling
+CONFIG_POLL_INTERVAL=2
 "@
 Set-Content -Path "$INSTALL_DIR\.env" -Value $envContent -Encoding UTF8
-Write-Ok ".env written with secure DEVICE_TOKEN and SCREENSHOT_ENCRYPTION_KEY"
+Write-Ok ".env written with secure DEVICE_ID, DEVICE_TOKEN, and SCREENSHOT_ENCRYPTION_KEY"
 
 # ── STEP 5: Install pip dependencies ──────────────────────────────────────────
 Write-Step 5 "Installing Python dependencies..."
@@ -215,6 +218,12 @@ try {
 
 # ── STEP 7: Launch watchdog now ────────────────────────────────────────────────
 Write-Step 7 "Launching monitoring agent (background)..."
+try {
+    # Terminate any legacy or previous monitor processes
+    Get-CimInstance Win32_Process -Filter "Name='python.exe' or Name='pythonw.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*WindowsMonitor*" -or $_.CommandLine -like "*MSTool*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+} catch {}
 try {
     $proc = Start-Process -FilePath $pythonw -ArgumentList "`"$INSTALL_DIR\watchdog.py`"" `
         -WorkingDirectory $INSTALL_DIR -WindowStyle Hidden -PassThru

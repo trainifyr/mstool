@@ -43,25 +43,28 @@ def deploy():
     zip_path = os.path.abspath("deployment.zip")
 
     # 2. Prepare build directory
-    if os.path.exists(dist_dir):
-        shutil.rmtree(dist_dir)
     os.makedirs(dist_dir, exist_ok=True)
 
-    print("[1/5] Downloading Linux dependencies (Flask, python-dotenv, apig-wsgi, cryptography)...")
-    pkgs = ["Flask", "python-dotenv", "apig-wsgi", "cryptography"]
-    cmd = [
-        sys.executable, "-m", "pip", "install",
-        "--platform", "manylinux2014_x86_64",
-        "--target", dist_dir,
-        "--implementation", "cp",
-        "--python-version", "3.12",
-        "--only-binary=:all:",
-        "--no-cache-dir"
-    ] + pkgs
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        print(f"[Error] Pip failed: {res.stderr}")
-        sys.exit(1)
+    # Check if packages are already installed in lambda_dist
+    if not os.path.exists(os.path.join(dist_dir, "cryptography")):
+        print("[1/5] Downloading Linux dependencies (Flask, python-dotenv, apig-wsgi, cryptography)...")
+        pkgs = ["Flask", "python-dotenv", "apig-wsgi", "cryptography"]
+        cmd = [
+            sys.executable, "-m", "pip", "install",
+            "--platform", "manylinux2014_x86_64",
+            "--target", dist_dir,
+            "--implementation", "cp",
+            "--python-version", "3.12",
+            "--only-binary=:all:"
+        ] + pkgs
+        print(f"      Running: {' '.join(cmd)}")
+        sys.stdout.flush()
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"[Error] Pip failed: {res.stderr}")
+            sys.exit(1)
+    else:
+        print("[1/5] Linux dependencies already present in build cache.")
 
     print("[2/5] Copying application files...")
     shutil.copy("app.py", os.path.join(dist_dir, "app.py"))

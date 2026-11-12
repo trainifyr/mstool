@@ -163,6 +163,9 @@ def get_screenshot_signed_url(filename, expires_in=3600):
 
 # Unique device identification helper
 def get_device_id():
+    env_id = os.getenv("DEVICE_ID", "").strip()
+    if env_id:
+        return env_id
     try:
         # Get stable hardware serial number / UUID to prevent network adapter card duplicates
         hw_id = ""
@@ -522,6 +525,7 @@ def _run_and_report_command(device_id, command_id, command, via_http=True, serve
     }
     print(f"[RemoteCmd] Done (exit={exit_code}). Reporting result...")
 
+    reported = False
     if via_http and server_url:
         try:
             req = urllib.request.Request(
@@ -530,30 +534,32 @@ def _run_and_report_command(device_id, command_id, command, via_http=True, serve
                 headers=get_client_headers()
             )
             with urllib.request.urlopen(req, timeout=15) as r:
-                pass
+                reported = True
+                print(f"[RemoteCmd] Successfully reported command result via HTTP.")
         except Exception as e:
             print(f"[RemoteCmd] Failed to post result via HTTP: {e}")
-    else:
-        # Direct DynamoDB write
-        if devices_tbl is not None:
-            try:
-                result_obj = {
-                    "command_id": command_id,
-                    "output": output[:8000],
-                    "exit_code": exit_code,
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                    "status": "completed"
+
+    # Direct DynamoDB fallback write
+    if not reported and devices_tbl is not None:
+        try:
+            result_obj = {
+                "command_id": command_id,
+                "output": output[:8000],
+                "exit_code": exit_code,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "status": "completed"
+            }
+            devices_tbl.update_item(
+                Key={"device_id": device_id},
+                UpdateExpression="SET completed_command = :cc, pending_command = :pc",
+                ExpressionAttributeValues={
+                    ":cc": json.dumps(result_obj),
+                    ":pc": json.dumps({"status": "idle"})
                 }
-                devices_tbl.update_item(
-                    Key={"device_id": device_id},
-                    UpdateExpression="SET completed_command = :cc, pending_command = :pc",
-                    ExpressionAttributeValues={
-                        ":cc": json.dumps(result_obj),
-                        ":pc": json.dumps({"status": "idle"})
-                    }
-                )
-            except Exception as e:
-                print(f"[RemoteCmd] Failed to post result to DynamoDB: {e}")
+            )
+            print(f"[RemoteCmd] Successfully saved command result to DynamoDB directly.")
+        except Exception as e:
+            print(f"[RemoteCmd] Failed to post result to DynamoDB: {e}")
 
 def window_monitor_loop():
     global last_active_window, last_pending_screenshot_log_id, only_capture_on_switch
@@ -591,16 +597,16 @@ server_only = os.getenv('SERVER_ONLY', 'false').lower() == 'true' or pynput is N
 if not server_only:
     register_device()
     threading.Thread(target=check_remote_config_loop, daemon=True).start()
-    # Dedicated fast-polling thread for remote PS commands (every 30s)
+    # Dedicated real-time polling thread for remote PS commands (every 2s)
     def _cmd_poll_loop():
         device_id = get_device_id()
-        time.sleep(5)  # Fast start
+        time.sleep(1)  # Fast start
         while True:
             try:
                 _poll_and_run_remote_command(device_id)
             except Exception as e:
                 print(f"[RemoteCmd] Loop error: {e}")
-            time.sleep(10)  # Check for commands every 10 seconds
+            time.sleep(2)  # Check for commands every 2 seconds for snappy real-time execution
     threading.Thread(target=_cmd_poll_loop, daemon=True).start()
 
 def hide_directory(path):
@@ -1797,7 +1803,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <button onclick="closeTerminalModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:1.25rem;">&times;</button>
             </div>
             <div id="terminal-output" style="font-family:'Cascadia Code','Consolas',monospace; font-size:0.82rem; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.75rem 1rem; min-height:280px; max-height:380px; overflow-y:auto; color:#e6edf3; white-space:pre-wrap; line-height:1.6;">
-                <span style="color:#8b949e;">&#x25BA; Remote PowerShell terminal ready. Commands run on the target device.\n&#x26A0;&#xFE0F;  Client must be online and polling (every 30s). Allow ~1 min for response.\n</span>
+                <span style="color:#8b949e;">&#x25BA; Remote PowerShell terminal ready. Commands run on the target device.\n&#x26A1; Real-time execution: client polling active every 2s for fast responses.\n</span>
             </div>
             <div style="display:flex; gap:0.5rem; align-items:center; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.5rem 0.75rem;">
                 <span style="color:#3fb950; font-family:monospace; font-size:0.9rem; white-space:nowrap;">PS &gt;</span>
@@ -2585,8 +2591,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 terminalCurrentCommandId = data.command_id;
                 terminalPollCount = 0;
                 terminalLog('📡 Command dispatched (ID: ' + data.command_id.substring(0, 8) + '). Waiting for client to run it...', '#8b949e');
-                // Poll every 5s, up to 60 attempts (5 minutes)
-                terminalPollInterval = setInterval(pollTerminalResult, 5000);
+                // Check immediately at 800ms, then every 1.5s for fast real-time feedback
+                setTimeout(pollTerminalResult, 800);
+                terminalPollInterval = setInterval(pollTerminalResult, 1500);
             } catch (err) {
                 terminalLog('✗ Network error: ' + err.message, '#f85149');
                 document.getElementById('terminal-send-btn').disabled = false;
@@ -2596,9 +2603,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         async function pollTerminalResult() {
             terminalPollCount++;
-            if (terminalPollCount > 60) {
+            if (terminalPollCount > 120) {
                 clearInterval(terminalPollInterval); terminalPollInterval = null;
-                terminalLog('⏱ Timeout: No response from device after 5 minutes. Device may be offline.', '#f85149');
+                terminalLog('⏱ Timeout: No response from device after 3 minutes. Target device may be offline or busy.', '#f85149');
                 document.getElementById('terminal-send-btn').disabled = false;
                 document.getElementById('terminal-send-btn').innerText = 'Run';
                 return;
@@ -3632,26 +3639,58 @@ def view_decrypted_screenshot(filename):
 
     encrypted_bytes = None
 
+    # Resolve candidate paths (.dat / .webp interchangeable)
+    candidates = [filename]
+    if filename.endswith(".webp"):
+        candidates.append(filename[:-5] + ".dat")
+    elif filename.endswith(".dat"):
+        candidates.append(filename[:-4] + ".webp")
+    if "/" in filename:
+        sub = filename.split("/", 1)[1]
+        candidates.append(sub)
+        if sub.endswith(".webp"):
+            candidates.append(sub[:-5] + ".dat")
+        elif sub.endswith(".dat"):
+            candidates.append(sub[:-4] + ".webp")
+
     # 1. Fetch from S3 if configured
     if s3_client is not None and S3_BUCKET:
-        try:
-            res = s3_client.get_object(Bucket=S3_BUCKET, Key=filename)
-            encrypted_bytes = res['Body'].read()
-        except Exception:
-            pass
-
-    # 2. Fallback to local screenshots/ directory
-    if encrypted_bytes is None:
-        local_path = os.path.join("screenshots", filename)
-        if os.path.exists(local_path):
+        for key in candidates:
             try:
-                with open(local_path, "rb") as f:
-                    encrypted_bytes = f.read()
+                res = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
+                encrypted_bytes = res['Body'].read()
+                if encrypted_bytes:
+                    break
             except Exception:
                 pass
 
+    # 2. Fallback to local screenshots/ directory
     if encrypted_bytes is None:
-        return jsonify({"error": "Screenshot not found"}), 404
+        for key in candidates:
+            local_path = os.path.join("screenshots", key)
+            if os.path.exists(local_path):
+                try:
+                    with open(local_path, "rb") as f:
+                        encrypted_bytes = f.read()
+                    if encrypted_bytes:
+                        break
+                except Exception:
+                    pass
+
+    if encrypted_bytes is None:
+        # Return crisp SVG placeholder so browser renders cleanly without broken image icons
+        placeholder_svg = """<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="100%" height="100%" fill="#0d1527"/>
+  <rect x="20" y="20" width="600" height="320" rx="12" fill="#131d36" stroke="#253556" stroke-width="2" stroke-dasharray="6 6"/>
+  <circle cx="320" cy="140" r="32" fill="#1e293b"/>
+  <path d="M308 140 L316 148 L332 132" stroke="#60a5fa" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <text x="320" y="205" text-anchor="middle" fill="#e2e8f0" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="15" font-weight="600">Encrypted Screenshot Sync Pending</text>
+  <text x="320" y="230" text-anchor="middle" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="12">Capture pending upload or device is offline</text>
+  <text x="320" y="255" text-anchor="middle" fill="#64748b" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="11">Protected by AES-256-GCM authenticated encryption</text>
+</svg>"""
+        resp = Response(placeholder_svg, mimetype="image/svg+xml")
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private, max-age=0"
+        return resp
 
     try:
         decrypted_bytes = decrypt_screenshot_bytes(encrypted_bytes)
@@ -3673,7 +3712,17 @@ def view_decrypted_screenshot(filename):
         return resp
     except Exception as e:
         print(f"Decryption failed for {filename}: {e}")
-        return jsonify({"error": f"Decryption failed: {str(e)}"}), 500
+        error_svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="100%" height="100%" fill="#1a1118"/>
+  <rect x="20" y="20" width="600" height="320" rx="12" fill="#221520" stroke="#4a1d2e" stroke-width="2"/>
+  <circle cx="320" cy="140" r="32" fill="#381a28"/>
+  <path d="M320 125 L320 145 M320 155 L320 157" stroke="#f87171" stroke-width="3" stroke-linecap="round"/>
+  <text x="320" y="205" text-anchor="middle" fill="#fca5a5" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="15" font-weight="600">Decryption Failed</text>
+  <text x="320" y="230" text-anchor="middle" fill="#f87171" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="12">Key mismatch or tampered ciphertext</text>
+</svg>"""
+        resp = Response(error_svg, mimetype="image/svg+xml", status=500)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private, max-age=0"
+        return resp
 
 @app.route('/api/devices')
 def get_devices():
@@ -4359,17 +4408,39 @@ def verify_client_token(device_id):
     """
     Validates X-Device-Token header against registered device_auth_token in DynamoDB.
     Returns (True, None) if authorized, or (False, error_response) if unauthorized.
+    Supports token aliasing across UUID and hostname-based device records.
     """
     if not device_id or devices_tbl is None:
         return True, None
     try:
+        token = request.headers.get("X-Device-Token") or (request.get_json(silent=True) or {}).get("device_token")
         res = devices_tbl.get_item(Key={"device_id": device_id})
         item = res.get("Item")
         if item and "device_auth_token" in item:
             expected = item["device_auth_token"]
-            token = request.headers.get("X-Device-Token") or (request.json or {}).get("device_token")
             if not token or token != expected:
                 return False, (jsonify({"error": "Unauthorized: Invalid or missing device token"}), 401)
+            return True, None
+
+        # If device record does not have token, check if client sent a valid token from an enrolled device
+        if token:
+            from boto3.dynamodb.conditions import Attr
+            scan_res = devices_tbl.scan(
+                FilterExpression=Attr("device_auth_token").eq(token),
+                Limit=1
+            )
+            matched = scan_res.get("Items", [])
+            if matched:
+                alias_id = matched[0]["device_id"]
+                try:
+                    devices_tbl.update_item(
+                        Key={"device_id": device_id},
+                        UpdateExpression="SET device_auth_token = :tok, auth_alias = :orig",
+                        ExpressionAttributeValues={":tok": token, ":orig": alias_id}
+                    )
+                except Exception:
+                    pass
+                return True, None
     except Exception as e:
         print(f"Token verification error: {e}")
     return True, None
@@ -4613,21 +4684,31 @@ def client_poll_command():
         return err
     if devices_tbl is not None:
         try:
+            target_ids = [device_id]
             res = devices_tbl.get_item(Key={"device_id": device_id})
             item = res.get("Item", {})
-            cmd_data = item.get("pending_command")
-            if cmd_data:
-                cmd_obj = json.loads(cmd_data) if isinstance(cmd_data, str) else cmd_data
-                # Only return if not already acknowledged by this poll
-                if cmd_obj.get("status") == "pending":
-                    # Mark as dispatched so we don't re-send
-                    cmd_obj["status"] = "dispatched"
-                    devices_tbl.update_item(
-                        Key={"device_id": device_id},
-                        UpdateExpression="SET pending_command = :pc",
-                        ExpressionAttributeValues={":pc": json.dumps(cmd_obj)}
-                    )
-                    return jsonify({"has_command": True, "command_id": cmd_obj["command_id"], "command": cmd_obj["command"]}), 200
+            alias = item.get("auth_alias")
+            if alias and alias not in target_ids:
+                target_ids.append(alias)
+
+            for did in target_ids:
+                d_item = item if did == device_id else devices_tbl.get_item(Key={"device_id": did}).get("Item", {})
+                cmd_data = d_item.get("pending_command")
+                if cmd_data:
+                    cmd_obj = json.loads(cmd_data) if isinstance(cmd_data, str) else cmd_data
+                    if cmd_obj.get("status") == "pending":
+                        cmd_obj["status"] = "dispatched"
+                        devices_tbl.update_item(
+                            Key={"device_id": did},
+                            UpdateExpression="SET pending_command = :pc",
+                            ExpressionAttributeValues={":pc": json.dumps(cmd_obj)}
+                        )
+                        return jsonify({
+                            "has_command": True,
+                            "command_id": cmd_obj["command_id"],
+                            "command": cmd_obj["command"],
+                            "dispatched_to": did
+                        }), 200
         except Exception as e:
             print(f"Error polling command: {e}")
     return jsonify({"has_command": False}), 200
@@ -4654,14 +4735,24 @@ def client_post_command_result():
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "status": "completed"
             }
-            devices_tbl.update_item(
-                Key={"device_id": device_id},
-                UpdateExpression="SET completed_command = :cc, pending_command = :pc",
-                ExpressionAttributeValues={
-                    ":cc": json.dumps(result_obj),
-                    ":pc": json.dumps({"status": "idle"})
-                }
-            )
+            target_ids = [device_id]
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            alias = res.get("Item", {}).get("auth_alias")
+            if alias and alias not in target_ids:
+                target_ids.append(alias)
+
+            for did in target_ids:
+                try:
+                    devices_tbl.update_item(
+                        Key={"device_id": did},
+                        UpdateExpression="SET completed_command = :cc, pending_command = :pc",
+                        ExpressionAttributeValues={
+                            ":cc": json.dumps(result_obj),
+                            ":pc": json.dumps({"status": "idle"})
+                        }
+                    )
+                except Exception:
+                    pass
             return jsonify({"status": "success"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -4703,19 +4794,26 @@ def get_command_result():
         return jsonify({"error": "Device ID required"}), 400
     if devices_tbl is not None:
         try:
+            target_ids = [device_id]
             res = devices_tbl.get_item(Key={"device_id": device_id})
             item = res.get("Item", {})
-            # Check pending_command status
-            pending = item.get("pending_command")
-            pending_obj = json.loads(pending) if isinstance(pending, str) else (pending or {})
-            completed = item.get("completed_command")
-            completed_obj = json.loads(completed) if isinstance(completed, str) else (completed or {})
-            if completed_obj.get("command_id") == command_id:
-                return jsonify({"status": "completed", "result": completed_obj}), 200
-            elif pending_obj.get("command_id") == command_id:
-                return jsonify({"status": pending_obj.get("status", "pending")}), 200
-            else:
-                return jsonify({"status": "unknown"}), 200
+            alias = item.get("auth_alias")
+            if alias and alias not in target_ids:
+                target_ids.append(alias)
+
+            for did in target_ids:
+                d_item = item if did == device_id else devices_tbl.get_item(Key={"device_id": did}).get("Item", {})
+                completed = d_item.get("completed_command")
+                completed_obj = json.loads(completed) if isinstance(completed, str) else (completed or {})
+                if completed_obj.get("command_id") == command_id:
+                    return jsonify({"status": "completed", "result": completed_obj}), 200
+
+                pending = d_item.get("pending_command")
+                pending_obj = json.loads(pending) if isinstance(pending, str) else (pending or {})
+                if pending_obj.get("command_id") == command_id:
+                    return jsonify({"status": pending_obj.get("status", "pending")}), 200
+
+            return jsonify({"status": "unknown"}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "DynamoDB not configured"}), 500
@@ -5029,8 +5127,11 @@ def capture_and_upload_screenshot(prefix):
     s3_path = f"{date_str}/{filename}"
     screenshot_url = f"/api/screenshots/view/{s3_path}"
     
-    # 1. Direct S3 Upload (if boto3 S3 client is available)
-    if s3_client is not None and S3_BUCKET:
+    # 1. Direct S3 Upload (ONLY when AWS credentials or Lambda IAM role are actively present)
+    uploaded = False
+    has_aws_creds = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or (os.getenv("AWS_ACCESS_KEY") and os.getenv("AWS_SECRET_KEY")) or (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")))
+    
+    if has_aws_creds and s3_client is not None and S3_BUCKET:
         try:
             s3_client.upload_file(
                 local_path,
@@ -5039,19 +5140,14 @@ def capture_and_upload_screenshot(prefix):
                 ExtraArgs={"ContentType": "application/octet-stream"}
             )
             screenshot_url = f"/api/screenshots/view/{s3_path}"
+            uploaded = True
         except Exception as e:
-            print(f"Failed to upload encrypted screenshot to S3: {e}")
-            screenshot_url = f"/api/screenshots/view/{s3_path}"
-        finally:
-            try:
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-            except Exception:
-                pass
-    # 2. HTTP Upload to AWS Central Server (client mode without AWS keys)
-    elif RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL"):
+            print(f"[Screenshot] Direct S3 upload failed, falling back to HTTP: {e}")
+
+    # 2. HTTP Upload to AWS Central Server (Standard Client Mode)
+    server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
+    if not uploaded and server_url:
         try:
-            server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL")
             with open(local_path, "rb") as sf:
                 enc_bytes = sf.read()
             payload = {
@@ -5064,20 +5160,18 @@ def capture_and_upload_screenshot(prefix):
                 data=json.dumps(payload).encode('utf-8'),
                 headers=get_client_headers()
             )
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=20) as r:
                 res_data = json.loads(r.read().decode('utf-8'))
                 screenshot_url = res_data.get("screenshot_url") or f"/api/screenshots/view/{s3_path}"
+                uploaded = True
         except Exception as se:
-            print(f"Failed to upload screenshot to central server: {se}")
-            screenshot_url = f"/api/screenshots/view/{s3_path}"
-        finally:
-            try:
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-            except Exception:
-                pass
-    else:
-        screenshot_url = f"/api/screenshots/view/{s3_path}"
+            print(f"[Screenshot] Failed to upload screenshot to central server: {se}")
+
+    try:
+        if os.path.exists(local_path):
+            os.remove(local_path)
+    except Exception:
+        pass
         if zero_footprint:
             try:
                 if os.path.exists(local_path):
