@@ -1,4 +1,5 @@
 import os
+import sys
 import io
 import re
 import json
@@ -7,6 +8,7 @@ import socket
 import ctypes
 import threading
 import queue
+import subprocess
 
 # Set process DPI awareness to resolve blank/black screenshots on scaled displays
 try:
@@ -3286,9 +3288,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         appendTerminalChunk('⚠ Command was superseded by another action or expired.' + String.fromCharCode(10), '#f85149');
                         appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
                     } else {
-                        const exitColor = data.exit_code === 0 ? '#3fb950' : '#f85149';
+                        const exitColor = (data.exit_code === 0 && s !== 'FAILED') ? '#3fb950' : '#f85149';
+                        const prefix = (data.exit_code === 0 && s === 'COMPLETED') ? '✓ Command Finished' : '✗ Command Failed';
                         appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
-                        appendTerminalChunk('✓ Command Finished [' + s + ']  |  Exit code: ' + (data.exit_code !== null ? data.exit_code : 'N/A') + '  |  Total Lines: ' + Number(data.total_lines).toLocaleString() + String.fromCharCode(10), exitColor);
+                        appendTerminalChunk(prefix + ' [' + s + ']  |  Exit code: ' + (data.exit_code !== null ? data.exit_code : 'N/A') + '  |  Total Lines: ' + Number(data.total_lines).toLocaleString() + String.fromCharCode(10), exitColor);
                         appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
                     }
                     
@@ -5886,7 +5889,7 @@ def client_post_command_stream():
                     update_expr += ", completed_command = :cc"
                     expr_vals[":cc"] = json.dumps({
                         "command_id": command_id,
-                        "status": "completed",
+                        "status": "completed" if (exit_code == 0 and state == "COMPLETED") else "failed",
                         "state": state,
                         "exit_code": exit_code,
                         "completed_at": now_iso
@@ -5917,13 +5920,15 @@ def client_post_command_result():
     touch_device_active(device_id)
     if devices_tbl is not None:
         try:
+            state_val = "COMPLETED" if exit_code == 0 else "FAILED"
+            status_val = "completed" if exit_code == 0 else "failed"
             result_obj = {
                 "command_id": command_id,
                 "output": output[:8000],  # Cap at 8KB to stay within DynamoDB limits
                 "exit_code": exit_code,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
-                "status": "completed",
-                "state": "COMPLETED",
+                "status": status_val,
+                "state": state_val,
                 "total_lines": len(output.splitlines())
             }
             # Also persist single stream chunk to logs_tbl so get_command_stream displays it immediately
