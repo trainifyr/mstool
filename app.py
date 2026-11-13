@@ -661,12 +661,27 @@ def _run_and_report_command(device_id, command_id, command, via_http=True, serve
     proc = None
     q = queue.Queue()
     ps_bin = shutil.which("powershell.exe") or shutil.which("powershell") or os.path.expandvars(r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    ps_env = os.environ.copy()
+    sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+    std_paths = [
+        os.path.join(sys_root, "System32"),
+        sys_root,
+        os.path.join(sys_root, r"System32\WindowsPowerShell\v1.0"),
+        os.path.join(sys_root, r"System32\Wbem")
+    ]
+    current_path = ps_env.get("PATH", "")
+    for p in std_paths:
+        if p.lower() not in current_path.lower():
+            current_path = p + os.pathsep + current_path
+    ps_env["PATH"] = current_path
+
     try:
         proc = subprocess.Popen(
             [ps_bin, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=ps_env,
             creationflags=0x08000000 if os.name == 'nt' else 0
         )
     except Exception as launch_err:
