@@ -9,6 +9,7 @@ import ctypes
 import threading
 import queue
 import subprocess
+import shutil
 
 # Set process DPI awareness to resolve blank/black screenshots on scaled displays
 try:
@@ -659,9 +660,10 @@ def _run_and_report_command(device_id, command_id, command, via_http=True, serve
     # 2. Launch PowerShell subprocess with unbuffered standard pipes
     proc = None
     q = queue.Queue()
+    ps_bin = shutil.which("powershell.exe") or shutil.which("powershell") or os.path.expandvars(r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     try:
         proc = subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+            [ps_bin, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
