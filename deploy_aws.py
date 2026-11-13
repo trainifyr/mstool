@@ -80,7 +80,26 @@ def deploy():
         print("[1/5] Linux dependencies already present in build cache.")
 
     print("[2/5] Copying application files...")
-    shutil.copy("app.py", os.path.join(dist_dir, "app.py"))
+    import re
+    with open("app.py", "r", encoding="utf-8") as f:
+        app_code = f.read()
+    app_code = re.sub(
+        r'APP_BUILD_VERSION\s*=\s*os\.getenv\("APP_BUILD_VERSION",\s*"[^"]+"\)',
+        f'APP_BUILD_VERSION = os.getenv("APP_BUILD_VERSION", "{build_version}")',
+        app_code
+    )
+    app_code = re.sub(
+        r'APP_BUILD_TIME\s*=\s*os\.getenv\("APP_BUILD_TIME",\s*"[^"]+"\)',
+        f'APP_BUILD_TIME = os.getenv("APP_BUILD_TIME", "{build_time}")',
+        app_code
+    )
+    app_code = re.sub(
+        r'APP_GIT_COMMIT\s*=\s*os\.getenv\("APP_GIT_COMMIT",\s*"[^"]+"\)',
+        f'APP_GIT_COMMIT = os.getenv("APP_GIT_COMMIT", "{git_commit}")',
+        app_code
+    )
+    with open(os.path.join(dist_dir, "app.py"), "w", encoding="utf-8") as f:
+        f.write(app_code)
     shutil.copy("watchdog.py", os.path.join(dist_dir, "watchdog.py"))
     if os.path.exists("setup_client.ps1"):
         shutil.copy("setup_client.ps1", os.path.join(dist_dir, "setup_client.ps1"))
