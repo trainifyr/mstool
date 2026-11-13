@@ -255,9 +255,9 @@ def monitor_loop():
     
     while True:
         try:
-            # Periodically check for updates (every 5 minutes / 300 seconds)
+            # Periodically check for updates (every 45 seconds for near-instant deployment)
             now_time = time.time()
-            if now_time - last_update_check_time >= 300:
+            if now_time - last_update_check_time >= 45:
                 last_update_check_time = now_time
                 if check_for_updates():
                     start_app()
@@ -280,7 +280,7 @@ def monitor_loop():
                 start_app()
         except Exception as e:
             log_event(f"Error in monitor loop: {e}")
-        time.sleep(60)
+        time.sleep(15)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--install":

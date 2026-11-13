@@ -6,6 +6,7 @@ import time
 import socket
 import ctypes
 import threading
+import queue
 
 # Set process DPI awareness to resolve blank/black screenshots on scaled displays
 try:
@@ -516,41 +517,14 @@ def _execute_av_diagnostic(device_id, command_id, mode, duration, via_http, serv
         except Exception as e:
             print(f"[AV] Failed to report AV result via HTTP: {e}")
 
-def _run_and_report_command(device_id, command_id, command, via_http=True, server_url=""):
-    """Execute a PowerShell command or AV diagnostic and post result back."""
-    if command.startswith("AV_DIAGNOSTIC:"):
-        parts = command.split(":")
-        mode = parts[1] if len(parts) > 1 else "audio"
-        duration = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 5
-        _execute_av_diagnostic(device_id, command_id, mode, duration, via_http, server_url)
-        return
-
-    print(f"[RemoteCmd] Executing command {command_id[:8]}: {command[:80]}")
-    exit_code = -1
-    output = ""
-    try:
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
-            creationflags=0x08000000 if os.name == 'nt' else 0
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        exit_code = result.returncode
-    except subprocess.TimeoutExpired:
-        output = "ERROR: Command timed out after 120 seconds."
-        exit_code = -1
-    except Exception as e:
-        output = f"ERROR executing command: {e}"
-        exit_code = -1
-
+def _report_legacy_result(device_id, command_id, output, exit_code, status_str, via_http=True, server_url=""):
+    """Backward compatibility helper for posting final result to legacy /api/client/command/result."""
     result_payload = {
         "device_id": device_id,
         "command_id": command_id,
         "output": output[:8000],
         "exit_code": exit_code
     }
-    print(f"[RemoteCmd] Done (exit={exit_code}). Reporting result...")
-
     reported = False
     if via_http and server_url:
         try:
@@ -559,13 +533,11 @@ def _run_and_report_command(device_id, command_id, command, via_http=True, serve
                 data=json.dumps(result_payload).encode('utf-8'),
                 headers=get_client_headers()
             )
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=10) as r:
                 reported = True
-                print(f"[RemoteCmd] Successfully reported command result via HTTP.")
-        except Exception as e:
-            print(f"[RemoteCmd] Failed to post result via HTTP: {e}")
+        except Exception:
+            pass
 
-    # Direct DynamoDB fallback write
     if not reported and devices_tbl is not None:
         try:
             result_obj = {
@@ -583,9 +555,276 @@ def _run_and_report_command(device_id, command_id, command, via_http=True, serve
                     ":pc": json.dumps({"status": "idle"})
                 }
             )
-            print(f"[RemoteCmd] Successfully saved command result to DynamoDB directly.")
-        except Exception as e:
-            print(f"[RemoteCmd] Failed to post result to DynamoDB: {e}")
+        except Exception:
+            pass
+
+def _run_and_report_command(device_id, command_id, command, via_http=True, server_url=""):
+    """
+    Near-Real-Time Remote PowerShell Execution with Asynchronous Streaming.
+    - Captures stdout and stderr concurrently without blocking.
+    - Sends partial chunks immediately; does not wait for newlines.
+    - Emits progress heartbeats at least every 5 seconds.
+    - Monotonically tracks sequence numbers (seq = 0, 1, 2...).
+    - Handles large streams (12,000+ lines) via bounded chunk batches.
+    - Enforces timeout safely with process termination and preserves partial output.
+    """
+    if command.startswith("AV_DIAGNOSTIC:"):
+        parts = command.split(":")
+        mode = parts[1] if len(parts) > 1 else "audio"
+        duration = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 5
+        _execute_av_diagnostic(device_id, command_id, mode, duration, via_http, server_url)
+        return
+
+    print(f"[RemoteCmd] Starting live streaming execution for {command_id[:8]}: {command[:80]}")
+
+    def _send_stream_update(state, events, elapsed_s, total_lines, exit_code=None):
+        payload = {
+            "device_id": device_id,
+            "command_id": command_id,
+            "state": state,
+            "elapsed_s": round(elapsed_s, 2),
+            "total_lines": total_lines,
+            "exit_code": exit_code,
+            "events": events
+        }
+        sent = False
+        if via_http and server_url:
+            try:
+                req = urllib.request.Request(
+                    f"{server_url.rstrip('/')}/api/client/command/stream",
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers=get_client_headers()
+                )
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    sent = True
+            except Exception as se:
+                print(f"[RemoteCmd] Stream POST error: {se}")
+
+        # Fallback direct DynamoDB write if central HTTP endpoint failed or not configured
+        if not sent and logs_tbl is not None:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for ev in events:
+                try:
+                    logs_tbl.put_item(Item={
+                        "device_id": f"cmdstream#{command_id}",
+                        "timestamp_id": f"{int(ev.get('seq', 0)):08d}",
+                        "seq": int(ev.get('seq', 0)),
+                        "stream": str(ev.get('stream', 'stdout')),
+                        "text": str(ev.get('text', '')),
+                        "timestamp": ev.get('timestamp') or now_iso
+                    })
+                except Exception:
+                    pass
+            if devices_tbl is not None:
+                try:
+                    status_obj = {
+                        "command_id": command_id,
+                        "status": state.lower(),
+                        "state": state,
+                        "elapsed_s": round(elapsed_s, 2),
+                        "total_lines": total_lines,
+                        "last_heartbeat": now_iso,
+                        "exit_code": exit_code
+                    }
+                    devices_tbl.update_item(
+                        Key={"device_id": device_id},
+                        UpdateExpression="SET pending_command = :pc",
+                        ExpressionAttributeValues={":pc": json.dumps(status_obj)}
+                    )
+                except Exception:
+                    pass
+
+    # 1. Acknowledge command receipt immediately
+    start_time = time.time()
+    next_seq = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    _send_stream_update(
+        state="ACKNOWLEDGED",
+        events=[{
+            "seq": next_seq,
+            "stream": "status",
+            "text": "Client acknowledged execution",
+            "timestamp": now_iso
+        }],
+        elapsed_s=0.0,
+        total_lines=0
+    )
+    next_seq += 1
+
+    # 2. Launch PowerShell subprocess with unbuffered standard pipes
+    proc = None
+    q = queue.Queue()
+    try:
+        proc = subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=0x08000000 if os.name == 'nt' else 0
+        )
+    except Exception as launch_err:
+        err_msg = f"Failed to launch PowerShell: {launch_err}"
+        print(f"[RemoteCmd] {err_msg}")
+        _send_stream_update(
+            state="FAILED",
+            events=[{
+                "seq": next_seq,
+                "stream": "stderr",
+                "text": err_msg,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }],
+            elapsed_s=round(time.time() - start_time, 2),
+            total_lines=1,
+            exit_code=-1
+        )
+        _report_legacy_result(device_id, command_id, err_msg, -1, "failed", via_http, server_url)
+        return
+
+    # 3. Spawn asynchronous background reader threads for stdout and stderr
+    def _read_pipe(stream_name, pipe):
+        try:
+            fd = pipe.fileno()
+            while True:
+                chunk_bytes = os.read(fd, 4096)
+                if not chunk_bytes:
+                    break
+                text = chunk_bytes.decode('utf-8', errors='replace')
+                q.put((stream_name, text))
+        except Exception:
+            pass
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    t_out = threading.Thread(target=_read_pipe, args=("stdout", proc.stdout), daemon=True)
+    t_err = threading.Thread(target=_read_pipe, args=("stderr", proc.stderr), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    # 4. Stream Loop: processes output chunks, emits 5s heartbeats, handles timeouts
+    timeout_sec = 600  # 10 minute execution limit
+    total_lines = 0
+    last_sent_time = time.time()
+    timed_out = False
+    collected_summary = []
+
+    while True:
+        now = time.time()
+        elapsed = now - start_time
+
+        # Check execution timeout
+        if elapsed > timeout_sec and proc.poll() is None:
+            timed_out = True
+            print(f"[RemoteCmd] Command {command_id[:8]} timed out after {timeout_sec}s. Terminating...")
+            try:
+                proc.terminate()
+                time.sleep(0.5)
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+            break
+
+        # Collect available chunks from queue (wait up to 0.25s)
+        chunks_to_send = []
+        try:
+            first_item = q.get(timeout=0.25)
+            chunks_to_send.append(first_item)
+            # Batch any additional pending items up to 32KB
+            bytes_drained = len(first_item[1])
+            while bytes_drained < 32768:
+                try:
+                    item = q.get_nowait()
+                    chunks_to_send.append(item)
+                    bytes_drained += len(item[1])
+                except queue.Empty:
+                    break
+        except queue.Empty:
+            pass
+
+        now = time.time()
+        elapsed = now - start_time
+
+        if chunks_to_send:
+            events = []
+            for st, txt in chunks_to_send:
+                events.append({
+                    "seq": next_seq,
+                    "stream": st,
+                    "text": txt,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                next_seq += 1
+                total_lines += txt.count('\n')
+                if len(collected_summary) < 500:
+                    collected_summary.append(txt)
+
+            _send_stream_update("RUNNING", events, elapsed, total_lines)
+            last_sent_time = now
+        else:
+            # Heartbeat requirement: at least every 5 seconds while running
+            if (now - last_sent_time) >= 5.0 and proc.poll() is None:
+                hb_text = f"Still running | {int(elapsed)}s | {total_lines:,} lines received"
+                hb_events = [{
+                    "seq": next_seq,
+                    "stream": "heartbeat",
+                    "text": hb_text,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }]
+                next_seq += 1
+                _send_stream_update("RUNNING", hb_events, elapsed, total_lines)
+                last_sent_time = now
+
+        # Exit loop when process has completed and all queue items drained
+        if proc.poll() is not None and q.empty():
+            break
+
+    # 5. Flush any final remaining chunks
+    drain_events = []
+    while not q.empty():
+        try:
+            st, txt = q.get_nowait()
+            drain_events.append({
+                "seq": next_seq,
+                "stream": st,
+                "text": txt,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            next_seq += 1
+            total_lines += txt.count('\n')
+            collected_summary.append(txt)
+        except queue.Empty:
+            break
+
+    total_duration = time.time() - start_time
+    if drain_events:
+        _send_stream_update("RUNNING", drain_events, total_duration, total_lines)
+
+    # 6. Final state and completion reporting
+    exit_code = proc.returncode if not timed_out else -1
+    if timed_out:
+        final_state = "TIMED_OUT"
+        status_text = f"Timed Out | Command exceeded {timeout_sec}s limit\nTotal: {total_lines:,} lines | Duration: {int(total_duration)}s"
+    elif exit_code == 0:
+        final_state = "COMPLETED"
+        status_text = f"Completed | Exit Code: 0\nTotal: {total_lines:,} lines | Duration: {int(total_duration)}s"
+    else:
+        final_state = "FAILED"
+        status_text = f"Failed | Exit Code: {exit_code}\nTotal: {total_lines:,} lines | Duration: {int(total_duration)}s"
+
+    final_event = [{
+        "seq": next_seq,
+        "stream": "status",
+        "text": status_text,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }]
+    _send_stream_update(final_state, final_event, total_duration, total_lines, exit_code=exit_code)
+
+    summary_str = "".join(collected_summary)[:8000]
+    _report_legacy_result(device_id, command_id, summary_str, exit_code, final_state, via_http, server_url)
+    print(f"[RemoteCmd] Stream completed for {command_id[:8]}: state={final_state}, lines={total_lines}, duration={int(total_duration)}s")
 
 def window_monitor_loop():
     global last_active_window, last_pending_screenshot_log_id, only_capture_on_switch
@@ -1829,15 +2068,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- Terminal Modal -->
     <div id="terminal-modal" class="modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:2100; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition: opacity 0.2s ease;">
-        <div style="background:#0d1117; border:1px solid #30363d; border-radius:12px; width:720px; max-width:95%; padding:1.25rem; box-shadow:0 8px 32px rgba(0,0,0,0.7); display:flex; flex-direction:column; gap:0.75rem;">
+        <div style="background:#0d1117; border:1px solid #30363d; border-radius:12px; width:760px; max-width:96%; padding:1.25rem; box-shadow:0 8px 32px rgba(0,0,0,0.7); display:flex; flex-direction:column; gap:0.75rem;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div style="display:flex; align-items:center; gap:0.6rem;">
                     <svg style="width:18px;height:18px;color:#58a6ff;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
                     <span style="font-size:1rem; font-weight:600; color:#e6edf3;">Remote PowerShell</span>
                     <span id="terminal-device-label" style="font-size:0.8rem; color:#8b949e; background:#21262d; padding:2px 8px; border-radius:4px;"></span>
                 </div>
-                <button onclick="clearTerminalHistory()" title="Clear session history from this browser" style="background:none; border:1px solid #30363d; color:#6e7681; cursor:pointer; font-size:0.72rem; padding:2px 8px; border-radius:4px; margin-right:6px;">🗑 Clear</button>
-                <button onclick="closeTerminalModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:1.25rem;">&times;</button>
+                <div style="display:flex; align-items:center; gap:0.4rem;">
+                    <button id="terminal-copy-btn" onclick="copyTerminalOutput()" title="Copy entire output history to clipboard" style="background:none; border:1px solid #30363d; color:#8b949e; cursor:pointer; font-size:0.72rem; padding:2px 8px; border-radius:4px;">📋 Copy</button>
+                    <button onclick="clearTerminalHistory()" title="Clear session history from this browser" style="background:none; border:1px solid #30363d; color:#6e7681; cursor:pointer; font-size:0.72rem; padding:2px 8px; border-radius:4px;">🗑 Clear</button>
+                    <button onclick="closeTerminalModal()" style="background:none; border:none; color:#8b949e; cursor:pointer; font-size:1.25rem; line-height:1; padding:0 4px;">&times;</button>
+                </div>
+            </div>
+            <!-- Live Status & Progress Bar -->
+            <div id="terminal-status-bar" style="display:flex; justify-content:space-between; align-items:center; background:#161b22; border:1px solid #30363d; border-radius:6px; padding:0.4rem 0.85rem; font-size:0.75rem;">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                    <span id="terminal-badge" style="background:#21262d; color:#8b949e; font-weight:700; padding:2px 8px; border-radius:10px; font-size:0.7rem; letter-spacing:0.5px;">READY</span>
+                    <span id="terminal-client-status" style="color:#8b949e;">Client: Connected</span>
+                </div>
+                <div style="display:flex; gap:0.75rem; color:#8b949e; font-family:'Cascadia Code','Consolas',monospace;">
+                    <span id="terminal-elapsed">Elapsed: 0s</span>
+                    <span style="color:#30363d;">|</span>
+                    <span id="terminal-lines">Lines: 0</span>
+                    <span style="color:#30363d;">|</span>
+                    <span id="terminal-rate" style="color:#38bdf8;">Near Real-Time</span>
+                </div>
             </div>
             <div id="terminal-output" style="font-family:'Cascadia Code','Consolas',monospace; font-size:0.82rem; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.75rem 1rem; min-height:280px; max-height:380px; overflow-y:auto; color:#e6edf3; white-space:pre-wrap; line-height:1.6;"></div>
             <div style="display:flex; gap:0.5rem; align-items:center; background:#010409; border:1px solid #21262d; border-radius:6px; padding:0.5rem 0.75rem;">
@@ -2638,15 +2894,104 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             catch(e) { return null; }
         }
 
+        let terminalCursor = -1;
+        let terminalFullBuffer = '';
+
+        function copyTerminalOutput() {
+            const textToCopy = terminalFullBuffer || (document.getElementById('terminal-output') ? document.getElementById('terminal-output').innerText : '');
+            if (!textToCopy) return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(textToCopy).then(() => {
+                    const btn = document.getElementById('terminal-copy-btn');
+                    if (btn) {
+                        const orig = btn.innerText;
+                        btn.innerText = '✓ Copied';
+                        setTimeout(() => { btn.innerText = orig; }, 1500);
+                    }
+                }).catch(() => {});
+            }
+        }
+
+        function updateTerminalBadge(state) {
+            const badge = document.getElementById('terminal-badge');
+            if (!badge) return;
+            const s = (state || 'READY').toUpperCase();
+            badge.innerText = s;
+            if (s === 'RUNNING') {
+                badge.style.background = '#238636';
+                badge.style.color = '#fff';
+            } else if (s === 'COMPLETED') {
+                badge.style.background = '#238636';
+                badge.style.color = '#fff';
+            } else if (s === 'FAILED') {
+                badge.style.background = '#da3633';
+                badge.style.color = '#fff';
+            } else if (s === 'TIMED_OUT') {
+                badge.style.background = '#d29922';
+                badge.style.color = '#fff';
+            } else if (s === 'ACKNOWLEDGED') {
+                badge.style.background = '#1f6feb';
+                badge.style.color = '#fff';
+            } else if (s === 'DISPATCHED') {
+                badge.style.background = '#0284c7';
+                badge.style.color = '#fff';
+            } else if (s === 'QUEUED') {
+                badge.style.background = '#d29922';
+                badge.style.color = '#000';
+            } else if (s === 'DISCONNECTED') {
+                badge.style.background = '#da3633';
+                badge.style.color = '#fff';
+            } else {
+                badge.style.background = '#21262d';
+                badge.style.color = '#8b949e';
+            }
+        }
+
+        function isTerminalNearBottom() {
+            const out = document.getElementById('terminal-output');
+            if (!out) return true;
+            return (out.scrollHeight - out.scrollTop - out.clientHeight) < 60;
+        }
+
+        function appendTerminalChunk(text, color, isSystemNotice) {
+            const out = document.getElementById('terminal-output');
+            if (!out) return;
+            const shouldScroll = isTerminalNearBottom();
+            const span = document.createElement('span');
+            span.style.color = color || '#e6edf3';
+            if (isSystemNotice) {
+                span.style.fontStyle = 'italic';
+            }
+            span.textContent = text;
+            out.appendChild(span);
+            terminalFullBuffer += text;
+
+            // DOM Virtualization: limit max children in DOM to 2500 so 12,000+ lines never lag the browser
+            while (out.childNodes.length > 2500) {
+                out.removeChild(out.firstChild);
+            }
+
+            if (shouldScroll) {
+                out.scrollTop = out.scrollHeight;
+            }
+        }
+
         function clearTerminalHistory() {
             if (!selectedDevice) return;
             try {
                 localStorage.removeItem(_termHistKey());
                 localStorage.removeItem(_termPendKey());
             } catch(e) {}
+            terminalCursor = -1;
+            terminalFullBuffer = '';
             const out = document.getElementById('terminal-output');
-            out.innerHTML = '';
-            terminalLog('► History cleared. Terminal ready.', '#8b949e');
+            if (out) out.innerHTML = '';
+            updateTerminalBadge('READY');
+            const elSpan = document.getElementById('terminal-elapsed');
+            if (elSpan) elSpan.innerText = 'Elapsed: 0s';
+            const lnSpan = document.getElementById('terminal-lines');
+            if (lnSpan) lnSpan.innerText = 'Lines: 0';
+            appendTerminalChunk('► History cleared. Terminal ready.' + String.fromCharCode(10), '#8b949e', true);
         }
         // ---- end persistence helpers ----
 
@@ -2659,6 +3004,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             // Clear the static initial HTML, restore persisted history
             const out = document.getElementById('terminal-output');
             out.innerHTML = '';
+            terminalCursor = -1;
+            terminalFullBuffer = '';
+            updateTerminalBadge('READY');
+
             const hist = (() => { try { return JSON.parse(localStorage.getItem(_termHistKey()) || '[]'); } catch(e) { return []; } })();
             if (hist.length === 0) {
                 // Fresh session — show welcome message (also save it)
@@ -2671,6 +3020,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     span.style.color = h.color;
                     span.textContent = h.text + String.fromCharCode(10);
                     out.appendChild(span);
+                    terminalFullBuffer += h.text + String.fromCharCode(10);
                 });
                 out.scrollTop = out.scrollHeight;
                 // Show a small "restored" notice (not saved to history)
@@ -2686,11 +3036,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (pending) {
                 terminalCurrentCommandId = pending;
                 terminalPollCount = 0;
+                terminalCursor = -1;
                 document.getElementById('terminal-send-btn').disabled = true;
                 document.getElementById('terminal-send-btn').innerText = 'Waiting...';
-                terminalLog('↻ Resuming poll for command ' + pending.substring(0, 8) + '...', '#8b949e');
-                setTimeout(pollTerminalResult, 400);
-                terminalPollInterval = setInterval(pollTerminalResult, 600);
+                terminalLog('↻ Resuming live stream for command ' + pending.substring(0, 8) + '...', '#8b949e');
+                setTimeout(pollTerminalStream, 300);
+                terminalPollInterval = setInterval(pollTerminalStream, 380);
             }
 
             const modal = document.getElementById('terminal-modal');
@@ -2707,7 +3058,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             modal.style.opacity = '0';
             modal.style.pointerEvents = 'none';
             // Keep poll alive in background — it will finish and save result
-            // But stop the DOM-update interval since modal is hidden
             if (terminalPollInterval) { clearInterval(terminalPollInterval); terminalPollInterval = null; }
             setTimeout(() => { modal.style.display = 'none'; }, 200);
         }
@@ -2731,8 +3081,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 span.textContent = text + String.fromCharCode(10);
                 out.appendChild(span);
                 out.scrollTop = out.scrollHeight;
+                terminalFullBuffer += text + String.fromCharCode(10);
             }
-            // Persist to localStorage (skip dim separator lines to save space)
             if (color !== '#30363d') {
                 _saveTermEntry(text, color || '#e6edf3');
             }
@@ -2745,11 +3095,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
             if (terminalPollInterval) { clearInterval(terminalPollInterval); terminalPollInterval = null; }
 
-            terminalLog('PS > ' + cmd, '#3fb950');
+            terminalCursor = -1;
+            terminalFullBuffer = '';
             input.value = '';
             document.getElementById('terminal-send-btn').disabled = true;
-            document.getElementById('terminal-send-btn').innerText = 'Waiting...';
-            terminalLog('⏳ Dispatching command to device...', '#8b949e');
+            document.getElementById('terminal-send-btn').innerText = 'Running...';
+            updateTerminalBadge('QUEUED');
+
+            appendTerminalChunk('PS > ' + cmd + String.fromCharCode(10), '#3fb950');
+            appendTerminalChunk('⏳ Dispatching command to device...' + String.fromCharCode(10), '#8b949e', true);
 
             try {
                 const res = await fetch('/api/devices/command', {
@@ -2759,63 +3113,107 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 });
                 const data = await res.json();
                 if (!res.ok) {
-                    terminalLog('✗ Error: ' + (data.error || 'Failed to dispatch'), '#f85149');
+                    appendTerminalChunk('✗ Error: ' + (data.error || 'Failed to dispatch') + String.fromCharCode(10), '#f85149');
                     document.getElementById('terminal-send-btn').disabled = false;
                     document.getElementById('terminal-send-btn').innerText = 'Run';
+                    updateTerminalBadge('FAILED');
                     _savePendingCmd(null);
                     return;
                 }
                 terminalCurrentCommandId = data.command_id;
                 terminalPollCount = 0;
                 _savePendingCmd(data.command_id);
-                terminalLog('📡 Command dispatched (ID: ' + data.command_id.substring(0, 8) + '). Waiting for client to run it...', '#8b949e');
-                // Check immediately at 400ms, then every 600ms for near real-time feedback
-                setTimeout(pollTerminalResult, 400);
-                terminalPollInterval = setInterval(pollTerminalResult, 600);
+                updateTerminalBadge('DISPATCHED');
+                appendTerminalChunk('📡 Command dispatched (ID: ' + data.command_id.substring(0, 8) + '). Waiting for client execution...' + String.fromCharCode(10), '#8b949e', true);
+
+                setTimeout(pollTerminalStream, 300);
+                terminalPollInterval = setInterval(pollTerminalStream, 380);
             } catch (err) {
-                terminalLog('✗ Network error: ' + err.message, '#f85149');
+                appendTerminalChunk('✗ Network error: ' + err.message + String.fromCharCode(10), '#f85149');
                 document.getElementById('terminal-send-btn').disabled = false;
                 document.getElementById('terminal-send-btn').innerText = 'Run';
+                updateTerminalBadge('FAILED');
                 _savePendingCmd(null);
             }
         }
 
-        async function pollTerminalResult() {
+        async function pollTerminalStream() {
             terminalPollCount++;
-            if (terminalPollCount > 300) {
+            if (terminalPollCount > 1200) {
                 clearInterval(terminalPollInterval); terminalPollInterval = null;
-                terminalLog('⏱ Timeout: No response from device after 3 minutes. Target device may be offline or busy.', '#f85149');
+                appendTerminalChunk('⏱ Client execution timeout (no stream termination received).' + String.fromCharCode(10), '#f85149');
                 document.getElementById('terminal-send-btn').disabled = false;
                 document.getElementById('terminal-send-btn').innerText = 'Run';
+                updateTerminalBadge('TIMED_OUT');
                 _savePendingCmd(null);
                 return;
             }
             try {
-                const res = await fetch(`/api/devices/command/result?device_id=${encodeURIComponent(selectedDevice)}&command_id=${encodeURIComponent(terminalCurrentCommandId)}`);
+                const res = await fetch(`/api/devices/command/stream?device_id=${encodeURIComponent(selectedDevice)}&command_id=${encodeURIComponent(terminalCurrentCommandId)}&cursor=${terminalCursor}`);
+                if (!res.ok) return;
                 const data = await res.json();
-                if (data.status === 'completed' && data.result) {
+
+                // 1. Update Metrics
+                const elSpan = document.getElementById('terminal-elapsed');
+                if (elSpan && data.elapsed_s !== undefined) {
+                    elSpan.innerText = 'Elapsed: ' + Math.round(data.elapsed_s) + 's';
+                }
+                const lnSpan = document.getElementById('terminal-lines');
+                if (lnSpan && data.total_lines !== undefined) {
+                    lnSpan.innerText = 'Lines: ' + Number(data.total_lines).toLocaleString();
+                }
+
+                // 2. Client Connection & Badge State
+                const cliSpan = document.getElementById('terminal-client-status');
+                if (data.client_connected === false) {
+                    if (cliSpan) cliSpan.innerHTML = '<span style="color:#f85149; font-weight:600;">Client: Unresponsive</span>';
+                    updateTerminalBadge('DISCONNECTED');
+                } else {
+                    if (cliSpan) cliSpan.innerHTML = '<span style="color:#3fb950;">Client: Connected</span>';
+                    updateTerminalBadge(data.state);
+                }
+
+                // 3. Render Ingestion Chunks (deduplicated by seq)
+                if (data.events && data.events.length > 0) {
+                    for (const ev of data.events) {
+                        if (ev.seq <= terminalCursor) continue;
+                        terminalCursor = ev.seq;
+
+                        if (ev.stream === 'stdout') {
+                            appendTerminalChunk(ev.text, '#e6edf3');
+                        } else if (ev.stream === 'stderr') {
+                            appendTerminalChunk(ev.text, '#f85149');
+                        } else if (ev.stream === 'heartbeat') {
+                            const timeStr = ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+                            appendTerminalChunk('[' + timeStr + '] ' + ev.text + String.fromCharCode(10), '#8b949e', true);
+                        } else if (ev.stream === 'status') {
+                            const timeStr = ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+                            appendTerminalChunk('[' + timeStr + '] ' + ev.text + String.fromCharCode(10), '#58a6ff', true);
+                        }
+                    }
+                }
+
+                // 4. Command Completion Handling
+                const s = (data.state || '').toUpperCase();
+                if (['COMPLETED', 'FAILED', 'TIMED_OUT'].includes(s)) {
                     clearInterval(terminalPollInterval); terminalPollInterval = null;
                     _savePendingCmd(null);
-                    const r = data.result;
-                    const exitColor = r.exit_code === 0 ? '#3fb950' : '#f85149';
-                    terminalLog('─'.repeat(60), '#30363d');
-                    if (r.output && r.output.trim()) {
-                        terminalLog(r.output, '#e6edf3');
-                    } else {
-                        terminalLog('(no output)', '#8b949e');
-                    }
-                    terminalLog(String.fromCharCode(10) + '✓ Exit code: ' + r.exit_code + '  |  Completed: ' + new Date(r.completed_at).toLocaleTimeString(), exitColor);
-                    terminalLog('─'.repeat(60), '#30363d');
+                    const exitColor = data.exit_code === 0 ? '#3fb950' : '#f85149';
+                    appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
+                    appendTerminalChunk('✓ Command Finished [' + s + ']  |  Exit code: ' + (data.exit_code !== null ? data.exit_code : 'N/A') + '  |  Total Lines: ' + Number(data.total_lines).toLocaleString() + String.fromCharCode(10), exitColor);
+                    appendTerminalChunk('─'.repeat(60) + String.fromCharCode(10), '#30363d');
+                    
                     const btn = document.getElementById('terminal-send-btn');
                     if (btn) { btn.disabled = false; btn.innerText = 'Run'; }
                     const inp = document.getElementById('terminal-input');
                     if (inp) inp.focus();
                 }
-                // else keep polling (pending/dispatched)
             } catch (err) {
-                // ignore transient poll errors
+                // Ignore transient network errors
             }
         }
+        // Backward compatibility alias
+        const pollTerminalResult = pollTerminalStream;
         // ==================== END REMOTE TERMINAL ====================
 
         // ==================== AV DIAGNOSTICS & MEDIA SESSIONS ====================
@@ -5217,7 +5615,9 @@ def client_poll_command():
 
                     if should_dispatch:
                         cmd_obj["status"] = "dispatched"
+                        cmd_obj["state"] = "DISPATCHED"
                         cmd_obj["dispatched_at"] = datetime.now(timezone.utc).isoformat()
+                        cmd_obj["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
                         devices_tbl.update_item(
                             Key={"device_id": did},
                             UpdateExpression="SET pending_command = :pc",
@@ -5233,9 +5633,87 @@ def client_poll_command():
             print(f"Error polling command: {e}")
     return jsonify({"has_command": False}), 200
 
+@app.route('/api/client/command/stream', methods=['POST'])
+def client_post_command_stream():
+    """Client streams incremental chunks, heartbeats, and status updates."""
+    data = request.json or {}
+    device_id = data.get("device_id")
+    command_id = data.get("command_id")
+    state = data.get("state", "RUNNING")
+    elapsed_s = data.get("elapsed_s", 0)
+    total_lines = data.get("total_lines", 0)
+    exit_code = data.get("exit_code")
+    events = data.get("events", [])
+
+    if not device_id or not command_id:
+        return jsonify({"error": "device_id and command_id required"}), 400
+    ok, err = verify_client_token(device_id)
+    if not ok:
+        return err
+
+    touch_device_active(device_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # 1. Store chunks in DynamoDB mstool_activity_logs
+    if logs_tbl is not None and events:
+        for ev in events:
+            seq_num = ev.get("seq", 0)
+            try:
+                logs_tbl.put_item(Item={
+                    "device_id": f"cmdstream#{command_id}",
+                    "timestamp_id": f"{int(seq_num):08d}",
+                    "seq": int(seq_num),
+                    "stream": str(ev.get("stream", "stdout")),
+                    "text": str(ev.get("text", "")),
+                    "timestamp": ev.get("timestamp") or now_iso
+                })
+            except Exception as pe:
+                print(f"Error persisting stream chunk {seq_num}: {pe}")
+
+    # 2. Update status and heartbeat in devices_tbl
+    if devices_tbl is not None:
+        try:
+            status_obj = {
+                "command_id": command_id,
+                "status": state.lower(),
+                "state": state,
+                "elapsed_s": elapsed_s,
+                "total_lines": total_lines,
+                "last_heartbeat": now_iso,
+                "exit_code": exit_code
+            }
+
+            target_ids = [device_id]
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            alias = res.get("Item", {}).get("auth_alias")
+            if alias and alias not in target_ids:
+                target_ids.append(alias)
+
+            for did in target_ids:
+                update_expr = "SET pending_command = :pc"
+                expr_vals = {":pc": json.dumps(status_obj)}
+                if state in ("COMPLETED", "FAILED", "TIMED_OUT"):
+                    update_expr += ", completed_command = :cc"
+                    expr_vals[":cc"] = json.dumps({
+                        "command_id": command_id,
+                        "status": "completed",
+                        "state": state,
+                        "exit_code": exit_code,
+                        "completed_at": now_iso
+                    })
+                devices_tbl.update_item(
+                    Key={"device_id": did},
+                    UpdateExpression=update_expr,
+                    ExpressionAttributeValues=expr_vals
+                )
+        except Exception as ue:
+            print(f"Error updating stream status in devices_tbl: {ue}")
+
+    return jsonify({"status": "ok", "state": state}), 200
+
 @app.route('/api/client/command/result', methods=['POST'])
 def client_post_command_result():
-    """Client posts the PS command output back to the server."""
+    """Client posts the PS command output back to the server (backward compatibility)."""
     data = request.json or {}
     device_id = data.get("device_id")
     command_id = data.get("command_id")
@@ -5246,7 +5724,6 @@ def client_post_command_result():
     ok, err = verify_client_token(device_id)
     if not ok:
         return err
-    touch_device_active(device_id)
     touch_device_active(device_id)
     if devices_tbl is not None:
         try:
@@ -5291,11 +5768,20 @@ def dispatch_command():
     if devices_tbl is not None:
         try:
             command_id = str(uuid.uuid4())
+            now_iso = datetime.now(timezone.utc).isoformat()
             cmd_obj = {
                 "command_id": command_id,
                 "command": command,
                 "status": "pending",
-                "dispatched_at": datetime.now(timezone.utc).isoformat()
+                "state": "QUEUED",
+                "created_at": now_iso,
+                "dispatched_at": None,
+                "acknowledged_at": None,
+                "last_heartbeat": now_iso,
+                "elapsed_s": 0,
+                "total_lines": 0,
+                "exit_code": None,
+                "last_seq": -1
             }
             devices_tbl.update_item(
                 Key={"device_id": device_id},
@@ -5306,6 +5792,107 @@ def dispatch_command():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "DynamoDB not configured"}), 500
+
+@app.route('/api/devices/command/stream', methods=['GET'])
+def get_command_stream():
+    """Dashboard polls for incremental execution stream, status, and 5s heartbeats."""
+    if not is_dashboard_authenticated():
+        return jsonify({"error": "Unauthorized"}), 401
+    device_id = request.args.get("device_id")
+    command_id = request.args.get("command_id")
+    cursor = int(request.args.get("cursor", -1))
+
+    if not device_id or not command_id:
+        return jsonify({"error": "device_id and command_id required"}), 400
+
+    events = []
+    state = "QUEUED"
+    elapsed_s = 0
+    total_lines = 0
+    exit_code = None
+    last_heartbeat = None
+    client_connected = True
+
+    # 1. Fetch current command metadata
+    if devices_tbl is not None:
+        try:
+            res = devices_tbl.get_item(Key={"device_id": device_id})
+            item = res.get("Item", {})
+            pending = item.get("pending_command")
+            pending_obj = json.loads(pending) if isinstance(pending, str) else (pending or {})
+            if pending_obj.get("command_id") == command_id:
+                state = pending_obj.get("state") or pending_obj.get("status", "QUEUED").upper()
+                elapsed_s = pending_obj.get("elapsed_s", 0)
+                total_lines = pending_obj.get("total_lines", 0)
+                exit_code = pending_obj.get("exit_code")
+                last_heartbeat = pending_obj.get("last_heartbeat") or item.get("last_active")
+            else:
+                completed = item.get("completed_command")
+                completed_obj = json.loads(completed) if isinstance(completed, str) else (completed or {})
+                if completed_obj.get("command_id") == command_id:
+                    state = completed_obj.get("state") or "COMPLETED"
+                    exit_code = completed_obj.get("exit_code", 0)
+                    last_heartbeat = completed_obj.get("completed_at")
+        except Exception as de:
+            print(f"Error reading stream state: {de}")
+
+    # Check client heartbeat freshness
+    if last_heartbeat and state in ("RUNNING", "ACKNOWLEDGED", "DISPATCHED"):
+        try:
+            hb_dt = datetime.fromisoformat(last_heartbeat.replace("Z", "+00:00"))
+            sec_since_hb = (datetime.now(timezone.utc) - hb_dt).total_seconds()
+            if sec_since_hb > 18:
+                client_connected = False
+        except Exception:
+            pass
+
+    # 2. Query new events since cursor
+    if logs_tbl is not None:
+        try:
+            next_cursor_str = f"{(cursor + 1):08d}"
+            from boto3.dynamodb.conditions import Key
+            res = logs_tbl.query(
+                KeyConditionExpression=Key('device_id').eq(f"cmdstream#{command_id}") & Key('timestamp_id').gte(next_cursor_str)
+            )
+            items = res.get("Items", [])
+            items.sort(key=lambda x: int(x.get("seq", 0)))
+            for it in items:
+                events.append({
+                    "seq": int(it.get("seq", 0)),
+                    "stream": it.get("stream", "stdout"),
+                    "text": it.get("text", ""),
+                    "timestamp": it.get("timestamp")
+                })
+        except Exception as qe:
+            print(f"Error querying stream events: {qe}")
+
+    # Backward compatibility fallback: if no stream chunks recorded yet completed_command exists
+    if not events and state == "COMPLETED" and cursor < 0:
+        if devices_tbl is not None:
+            try:
+                res = devices_tbl.get_item(Key={"device_id": device_id})
+                comp = res.get("Item", {}).get("completed_command")
+                comp_obj = json.loads(comp) if isinstance(comp, str) else (comp or {})
+                if comp_obj.get("command_id") == command_id and comp_obj.get("output"):
+                    events.append({
+                        "seq": 0,
+                        "stream": "stdout",
+                        "text": comp_obj.get("output"),
+                        "timestamp": comp_obj.get("completed_at")
+                    })
+            except Exception:
+                pass
+
+    return jsonify({
+        "command_id": command_id,
+        "state": state,
+        "elapsed_s": elapsed_s,
+        "total_lines": total_lines,
+        "exit_code": exit_code,
+        "last_heartbeat": last_heartbeat,
+        "client_connected": client_connected,
+        "events": events
+    }), 200
 
 @app.route('/api/devices/command/result', methods=['GET'])
 def get_command_result():
