@@ -329,7 +329,7 @@ def check_remote_config_loop():
         except Exception as e:
             print(f"Failed to check remote config status: {e}")
             
-        poll_interval = int(os.getenv("CONFIG_POLL_INTERVAL", "900"))
+        poll_interval = int(os.getenv("CONFIG_POLL_INTERVAL", "3"))
         time.sleep(poll_interval)
 
 _ACTIVE_REMOTE_CMDS = set()
@@ -5789,16 +5789,19 @@ def client_poll_command():
                     status_val = cmd_obj.get("status")
                     should_dispatch = (status_val == "pending")
                     if not should_dispatch and status_val == "dispatched":
-                        disp_iso = cmd_obj.get("dispatched_at")
-                        if disp_iso:
-                            try:
-                                disp_dt = datetime.fromisoformat(disp_iso.replace("Z", "+00:00"))
-                                age_sec = (datetime.now(timezone.utc) - disp_dt).total_seconds()
-                                retry_after = 25 if str(cmd_obj.get("command", "")).startswith("AV_DIAGNOSTIC:") else 12
-                                if age_sec > retry_after:
-                                    should_dispatch = True
-                            except Exception:
-                                pass
+                        cmd_text = str(cmd_obj.get("command", ""))
+                        is_update = ("update/app.py" in cmd_text or "$u = " in cmd_text)
+                        if not is_update:
+                            disp_iso = cmd_obj.get("dispatched_at")
+                            if disp_iso:
+                                try:
+                                    disp_dt = datetime.fromisoformat(disp_iso.replace("Z", "+00:00"))
+                                    age_sec = (datetime.now(timezone.utc) - disp_dt).total_seconds()
+                                    retry_after = 30 if cmd_text.startswith("AV_DIAGNOSTIC:") else 120
+                                    if age_sec > retry_after:
+                                        should_dispatch = True
+                                except Exception:
+                                    pass
 
                     if should_dispatch:
                         cmd_obj["status"] = "dispatched"
