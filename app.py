@@ -874,6 +874,35 @@ if not server_only:
             time.sleep(0.8)  # Check for commands every 0.8 seconds for near real-time execution
     threading.Thread(target=_cmd_poll_loop, daemon=True).start()
 
+    # Dedicated auto-update polling thread to keep client machine synchronized with central server
+    def _client_auto_update_loop():
+        """Client auto-updates app.py from central server when a new build is deployed."""
+        if os.name != 'nt':
+            return
+        time.sleep(15)  # Let startup complete
+        while True:
+            try:
+                server_url = RENDER_SERVER_URL or os.getenv("RENDER_SERVER_URL", "")
+                if server_url:
+                    update_url = f"{server_url.rstrip('/')}/api/client/update/app.py"
+                    req = urllib.request.Request(update_url, headers=get_client_headers())
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        if r.status == 200:
+                            remote_code = r.read().decode('utf-8')
+                            local_path = os.path.abspath(__file__)
+                            with open(local_path, "r", encoding="utf-8") as lf:
+                                local_code = lf.read()
+                            if remote_code.strip() and remote_code != local_code:
+                                print("[AutoUpdate] New version of app.py detected. Updating local file and restarting...")
+                                with open(local_path, "w", encoding="utf-8") as lf:
+                                    lf.write(remote_code)
+                                time.sleep(1)
+                                os._exit(0)
+            except Exception as e:
+                pass
+            time.sleep(45)
+    threading.Thread(target=_client_auto_update_loop, daemon=True).start()
+
 def hide_directory(path):
     """Sets a directory attribute to hidden in Windows (NT)."""
     try:

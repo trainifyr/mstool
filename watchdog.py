@@ -176,6 +176,8 @@ def kill_stale_processes():
 def start_app():
     log_event("Starting app.py...")
     try:
+        kill_stale_processes()
+        time.sleep(1)
         # Run app.py in background silently using pythonw.exe
         subprocess.Popen([PYTHONW_EXE, SCRIPT_PATH], cwd=os.path.dirname(SCRIPT_PATH), **SUBPROCESS_FLAGS)
         log_event("app.py successfully launched.")
